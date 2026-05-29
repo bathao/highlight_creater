@@ -91,6 +91,7 @@ class Clip:
     start: float
     end: float
     slowmo: bool = True  # if False: only real-speed segment, no slow-mo
+    video_path: Optional[Path] = None  # source video for this clip (multi-source)
 
     @property
     def duration(self) -> float:
@@ -100,7 +101,7 @@ class Clip:
 @dataclass
 class RenderJob:
     job_id: str
-    video_path: Path
+    video_path: Path           # fallback source for clips without their own video_path
     clips: List[Clip]
     slow_ratio: float           # 0.5 = 50% speed (= 2x slower)
     intro_seconds: float
@@ -286,7 +287,13 @@ def _video_filter(width: int, height: int, fps: float, setpts: Optional[float] =
     parts = []
     if setpts is not None:
         parts.append(f"setpts={setpts:.5f}*PTS")
-    parts.append(f"scale={width}:{height}:flags=lanczos")
+    # Aspect-preserving scale + letterbox pad so sources of any resolution/aspect
+    # land on the same canvas without stretching. For a source already matching
+    # the target this is an identity (scale = no-op, pad = 0). setsar=1 forces
+    # square pixels so every segment shares SAR/DAR -> concat -c copy stays valid.
+    parts.append(f"scale={width}:{height}:force_original_aspect_ratio=decrease:flags=lanczos")
+    parts.append(f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black")
+    parts.append("setsar=1")
     parts.append(f"fps={fps}")
     parts.append("format=yuv420p")
     return ",".join(parts)
@@ -329,7 +336,7 @@ def render_intro(
     width: int,
     height: int,
     fps: float,
-    has_audio: bool,
+    need_audio: bool,
     on_progress: Callable[[float], None],
 ) -> None:
     png = TEMP_DIR / f"{job.job_id}_intro.png"
@@ -342,7 +349,7 @@ def render_intro(
         "-t", f"{job.intro_seconds:.3f}",
         "-i", str(png),
     ]
-    if has_audio:
+    if need_audio:
         # Generate silent stereo track to keep concat audio stream consistent
         args += [
             "-f", "lavfi",
@@ -354,8 +361,8 @@ def render_intro(
         "-vf", _video_filter(width, height, fps),
         *NVENC_ARGS,
     ]
-    if has_audio:
-        args += ["-map", "0:v", "-map", "1:a", "-shortest", *AAC_ARGS]
+    if need_audio:
+        args += ["-map", "0:v:0", "-map", "1:a", "-shortest", *AAC_ARGS]
     else:
         args += ["-an"]
     args += ["-movflags", "+faststart", str(out_path)]
@@ -369,22 +376,45 @@ def render_real(
     width: int,
     height: int,
     fps: float,
-    has_audio: bool,
+    source_has_audio: bool,
+    need_audio: bool,
     on_progress: Callable[[float], None],
 ) -> None:
+    src = clip.video_path or job.video_path
     args = [
         "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
         "-progress", "pipe:1", "-nostats",
         "-hwaccel", "cuda",
         "-ss", f"{clip.start:.3f}",
         "-to", f"{clip.end:.3f}",
-        "-i", str(job.video_path),
-        "-vf", _video_filter(width, height, fps),
-        *NVENC_ARGS,
-        *_audio_args_or_none(has_audio),
-        "-movflags", "+faststart",
-        str(out_path),
+        "-i", str(src),
     ]
+    if source_has_audio:
+        # Map the source's own audio.
+        args += [
+            "-vf", _video_filter(width, height, fps),
+            *NVENC_ARGS,
+            *AAC_ARGS,
+        ]
+    elif need_audio:
+        # Source is silent but the job needs a uniform audio track for concat:
+        # attach a generated silent stereo track.
+        args += [
+            "-f", "lavfi", "-t", f"{clip.duration:.3f}",
+            "-i", "anullsrc=r=48000:cl=stereo",
+            "-vf", _video_filter(width, height, fps),
+            "-map", "0:v:0", "-map", "1:a", "-shortest",
+            *NVENC_ARGS,
+            *AAC_ARGS,
+        ]
+    else:
+        args += [
+            "-map", "0:v:0",
+            "-vf", _video_filter(width, height, fps),
+            *NVENC_ARGS,
+            "-an",
+        ]
+    args += ["-movflags", "+faststart", str(out_path)]
     _run_ffmpeg(args, clip.duration, on_progress, job.cancel)
 
 
@@ -395,9 +425,11 @@ def render_slowmo(
     width: int,
     height: int,
     fps: float,
-    has_audio: bool,
+    source_has_audio: bool,
+    need_audio: bool,
     on_progress: Callable[[float], None],
 ) -> None:
+    src = clip.video_path or job.video_path
     factor = 1.0 / max(0.05, job.slow_ratio)  # 0.5 -> 2.0
     out_duration = clip.duration * factor
 
@@ -406,14 +438,15 @@ def render_slowmo(
     if badge:
         vf = f"{vf},{badge}"
 
-    # Slow-mo audio strategy:
-    #   1. If sounds/slow_motion.mp3 exists AND source video has audio -> replace
-    #      original audio with the music (looped to fill out_duration). The
-    #      original audio is dropped entirely so commentary/crowd noise doesn't
-    #      fight the music.
-    #   2. Else if source has audio -> fallback to atempo-slowed original audio.
-    #   3. Else -> no audio.
-    use_music = has_audio and SLOWMO_AUDIO.is_file()
+    # Slow-mo audio strategy (must yield an audio track whenever the job needs one
+    # so every segment concats with -c copy):
+    #   1. If sounds/slow_motion.mp3 exists AND job needs audio -> replace audio
+    #      with the music (looped to fill out_duration). Works even for silent
+    #      sources since the music is independent of the source audio.
+    #   2. Else if source has audio -> atempo-slowed original audio.
+    #   3. Else if job needs audio (silent source) -> generated silent track.
+    #   4. Else -> no audio.
+    use_music = need_audio and SLOWMO_AUDIO.is_file()
 
     if use_music:
         args = [
@@ -422,14 +455,14 @@ def render_slowmo(
             "-hwaccel", "cuda",
             "-ss", f"{clip.start:.3f}",
             "-to", f"{clip.end:.3f}",
-            "-i", str(job.video_path),
+            "-i", str(src),
             # Loop the music indefinitely, cap at slow-mo duration. Both options
             # must precede -i to apply to that input.
             "-stream_loop", "-1",
             "-t", f"{out_duration:.3f}",
             "-i", str(SLOWMO_AUDIO),
             "-vf", vf,
-            "-map", "0:v",
+            "-map", "0:v:0",
             "-map", "1:a",
             "-shortest",
             *NVENC_ARGS,
@@ -437,18 +470,36 @@ def render_slowmo(
             "-movflags", "+faststart",
             str(out_path),
         ]
-    elif has_audio:
+    elif source_has_audio:
         atempo = _atempo_chain(job.slow_ratio)
-        fc = f"[0:v]{vf}[v];[0:a]{atempo}[a]"
+        fc = f"[0:v:0]{vf}[v];[0:a:0]{atempo}[a]"
         args = [
             "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
             "-progress", "pipe:1", "-nostats",
             "-hwaccel", "cuda",
             "-ss", f"{clip.start:.3f}",
             "-to", f"{clip.end:.3f}",
-            "-i", str(job.video_path),
+            "-i", str(src),
             "-filter_complex", fc,
             "-map", "[v]", "-map", "[a]",
+            *NVENC_ARGS,
+            *AAC_ARGS,
+            "-movflags", "+faststart",
+            str(out_path),
+        ]
+    elif need_audio:
+        # Silent source but the job needs a uniform audio track.
+        args = [
+            "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+            "-progress", "pipe:1", "-nostats",
+            "-hwaccel", "cuda",
+            "-ss", f"{clip.start:.3f}",
+            "-to", f"{clip.end:.3f}",
+            "-i", str(src),
+            "-f", "lavfi", "-t", f"{out_duration:.3f}",
+            "-i", "anullsrc=r=48000:cl=stereo",
+            "-vf", vf,
+            "-map", "0:v:0", "-map", "1:a", "-shortest",
             *NVENC_ARGS,
             *AAC_ARGS,
             "-movflags", "+faststart",
@@ -461,7 +512,7 @@ def render_slowmo(
             "-hwaccel", "cuda",
             "-ss", f"{clip.start:.3f}",
             "-to", f"{clip.end:.3f}",
-            "-i", str(job.video_path),
+            "-i", str(src),
             "-vf", vf,
             *NVENC_ARGS,
             "-an",
@@ -511,12 +562,37 @@ def run_job(job: RenderJob) -> None:
     job.message = "Probing input..."
 
     try:
-        info = probe_video(job.video_path)
-        width, height, fps = info["width"], info["height"], info["fps"]
-        has_audio = bool(info.get("has_audio", False))
+        # Collect unique source videos in first-appearance order. Each clip may
+        # carry its own video_path (multi-source); fall back to job.video_path.
+        source_order: List[Path] = []
+        for c in job.clips:
+            sp = c.video_path or job.video_path
+            if sp not in source_order:
+                source_order.append(sp)
+        if not source_order:
+            source_order = [job.video_path]
+
+        # Probe every distinct source once; cache the info.
+        source_info: Dict[Path, dict] = {}
+        for sp in source_order:
+            source_info[sp] = probe_video(sp)
+
+        # Canvas = resolution of the FIRST source (the first clip's video).
+        # Every segment is scaled+letterboxed onto this canvas so concat works.
+        first = source_info[source_order[0]]
+        width, height, fps = first["width"], first["height"], first["fps"]
         # Cap fps at 60 for slow-mo headroom; concat needs uniform timing.
         if fps > 60:
             fps = 60.0
+
+        # If ANY source has audio, every segment must carry an audio track so the
+        # final concat -c copy has a consistent stream layout. Silent sources get
+        # a generated silent track.
+        need_audio = any(bool(i.get("has_audio", False)) for i in source_info.values())
+
+        def clip_has_audio(clip: Clip) -> bool:
+            sp = clip.video_path or job.video_path
+            return bool(source_info.get(sp, {}).get("has_audio", False))
 
         # Plan the work: per-segment weights so progress is monotonic.
         intro_weight = job.intro_seconds
@@ -542,7 +618,7 @@ def run_job(job: RenderJob) -> None:
             job.stage = "intro"
             job.message = "Rendering intro..."
             intro_file = TEMP_DIR / f"{job.job_id}_00_intro.mp4"
-            render_intro(job, intro_file, width, height, fps, has_audio,
+            render_intro(job, intro_file, width, height, fps, need_audio,
                          stage_progress(intro_weight))
             segments.append(intro_file)
             completed += intro_weight
@@ -555,7 +631,8 @@ def run_job(job: RenderJob) -> None:
             job.stage = f"clip {idx}/{len(job.clips)} - real"
             job.message = f"Rendering clip {idx} (real-speed)..."
             real_file = TEMP_DIR / f"{job.job_id}_{idx:02d}_real.mp4"
-            render_real(job, clip, real_file, width, height, fps, has_audio,
+            render_real(job, clip, real_file, width, height, fps,
+                        clip_has_audio(clip), need_audio,
                         stage_progress(clip.duration))
             segments.append(real_file)
             completed += clip.duration
@@ -564,7 +641,8 @@ def run_job(job: RenderJob) -> None:
                 job.stage = f"clip {idx}/{len(job.clips)} - slowmo"
                 job.message = f"Rendering clip {idx} (slow-mo {int(job.slow_ratio*100)}%)..."
                 slow_file = TEMP_DIR / f"{job.job_id}_{idx:02d}_slow.mp4"
-                render_slowmo(job, clip, slow_file, width, height, fps, has_audio,
+                render_slowmo(job, clip, slow_file, width, height, fps,
+                              clip_has_audio(clip), need_audio,
                               stage_progress(clip.duration * factor))
                 segments.append(slow_file)
                 completed += clip.duration * factor

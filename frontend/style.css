@@ -260,17 +260,6 @@ input[type="range"] {
   background: linear-gradient(90deg, #4a7dff 0%, #4ab3ff 100%);
   border-radius: 3px;
 }
-.timeline-markers {
-  position: absolute; inset: 0;
-  pointer-events: none;
-}
-.clip-marker {
-  position: absolute;
-  top: -2px; bottom: -2px;
-  background: rgba(255, 196, 0, 0.55);
-  border-left: 1px solid rgba(255, 213, 80, 0.9);
-  border-right: 1px solid rgba(255, 213, 80, 0.9);
-}
 .timeline-thumb {
   position: absolute;
   top: 50%;
@@ -420,6 +409,7 @@ input[type="range"] {
 }
 .clips-table col.col-check  { width: 50px; }
 .clips-table col.col-num    { width: 36px; }
+.clips-table col.col-src    { width: 56px; }
 .clips-table col.col-time   { width: 130px; }
 .clips-table col.col-dur    { width: 70px; }
 .clips-table col.col-act    { width: 380px; }
@@ -446,6 +436,20 @@ input[type="range"] {
 }
 .clips-table td { padding: 8px 8px; vertical-align: middle; }
 .clips-table td.dur { color: #8b94a7; font-family: 'Cascadia Code', Consolas, monospace; }
+.clips-table td.src { text-align: center; }
+.clips-table .src-badge {
+  display: inline-block;
+  min-width: 26px;
+  padding: 2px 7px;
+  border-radius: 6px;
+  background: #232c47;
+  border: 1px solid #3a4670;
+  color: #aeb8ff;
+  font-size: 12px;
+  font-weight: 600;
+  font-family: 'Cascadia Code', Consolas, monospace;
+  cursor: default;
+}
 .clips-table input.t-input {
   width: 100%;
   background: #0d1322; color: #e8ecf5;

@@ -1,7 +1,7 @@
 # Highlight Creator — Tiến độ dự án
 
-> Cập nhật: 2026-05-14 (thêm nhạc nền cho slow-motion)
-> Đối chiếu lại: 2026-05-29 — code không đổi từ 2026-05-14, mọi line-reference vẫn chính xác.
+> Cập nhật: 2026-05-29 (multi-source input — ghép pha từ nhiều video nguồn vào 1 output)
+> Trước đó: 2026-05-14 (thêm nhạc nền cho slow-motion)
 > Web app local (FastAPI + Vanilla JS) để tạo video highlight từ video gốc, với intro card và slow-motion replay, dùng NVENC (RTX) để render nhanh.
 
 ---
@@ -40,6 +40,8 @@ highlight_creator/
 - [x] Probe video (width/height/fps/duration/has_audio) qua ffprobe ([backend/render.py:142-172](backend/render.py#L142-L172))
 - [x] **Byte-range streaming** (HTTP 206) cho scrub mượt trên video 2K/4K ([backend/main.py:114-167](backend/main.py#L114-L167))
 - [x] **Render pipeline** intro + (real, slow)*N + concat `-c copy` ([backend/render.py:474-582](backend/render.py#L474-L582))
+- [x] **Multi-source input** — mỗi clip mang `video_path` riêng; `run_job` probe từng nguồn, lấy canvas = video đầu tiên, scale giữ aspect + letterbox (`force_original_aspect_ratio=decrease` + `pad` + `setsar=1`) nên ghép được video khác độ phân giải/fps/tỉ lệ ([backend/render.py:285-292](backend/render.py#L285-L292), [557-590](backend/render.py#L557-L590))
+- [x] **Audio đồng nhất đa nguồn** — `need_audio = any(source có audio)`; nguồn câm được chèn track `anullsrc` im lặng để `concat -c copy` không vỡ ([backend/render.py:365-410](backend/render.py#L365-L410))
 - [x] **Intro card** sinh PNG bằng Pillow (giải đấu + VĐV1 vs VĐV2) ([backend/render.py:188-238](backend/render.py#L188-L238))
 - [x] **Slow-motion** với `setpts` + `atempo` chain (fallback nếu không có nhạc nền), badge "SLOW MOTION" góc phải ([backend/render.py:297-318](backend/render.py#L297-L318))
 - [x] **Nhạc nền slow-motion** — thay audio gốc bằng `sounds/slow_motion.mp3`, auto-loop nếu pha dài hơn nhạc, cap đúng `out_duration` ([backend/render.py:391-468](backend/render.py#L391-L468))
@@ -62,7 +64,8 @@ highlight_creator/
 - [x] **Clip table** edit inline thời gian, ↑/↓ reorder, xoá, preview, export riêng ([frontend/app.js:382-409](frontend/app.js#L382-L409))
 - [x] **Slow-mo per clip** (checkbox SLO) — bỏ chọn = chỉ render real-speed ([frontend/app.js:426-438](frontend/app.js#L426-L438))
 - [x] **Project save/load UI** với validate tên, confirm overwrite ([frontend/app.js:570-633](frontend/app.js#L570-L633))
-- [x] **Auto-persist state** vào `localStorage` (tournament, VĐV, slow %, clips, video đang chọn) ([frontend/app.js:74-104](frontend/app.js#L74-L104))
+- [x] **Multi-source UI** — đổi video để thêm pha từ nhiều nguồn; mỗi pha gắn `video` + badge `V1/V2…` cột "Nguồn"; preview tự chuyển player sang đúng nguồn ([frontend/app.js:350-395](frontend/app.js#L350-L395), [457-490](frontend/app.js#L457-L490))
+- [x] **Auto-persist state** vào `localStorage` (tournament, VĐV, slow %, clips kèm nguồn, video đang chọn) + **migration v1→v2** (backfill `video` cho clip cũ) ([frontend/app.js:74-114](frontend/app.js#L74-L114))
 - [x] **SSE listener** + progress bar có shimmer, error state ([frontend/app.js:737-781](frontend/app.js#L737-L781))
 - [x] **Render summary** real-time: tổng pha, slow-mo, intro, output ≈ Ns ([frontend/app.js:476-503](frontend/app.js#L476-L503))
 
@@ -80,13 +83,13 @@ highlight_creator/
 - [ ] **Test** — chưa có unit/integration test
 - [ ] **Job history** — sau khi đóng tab là mất, không xem được job cũ
 - [ ] **Hậu xử lý audio**: chưa có normalize loudness / fade in-out giữa các segment
-- [ ] **Multi-video timeline** — chỉ render từ 1 video nguồn / 1 lần
 - [ ] **Subtitle / overlay tên VĐV** trên từng pha
+- [x] ~~**Multi-video timeline**~~ — ĐÃ XONG 2026-05-29: ghép pha từ nhiều video nguồn vào 1 output
 
 ### Cải thiện đề xuất
 - [ ] **Backend**: `_atempo_chain` có thể bị infinite loop với ratio quá nhỏ (đã clamp 0.05, ổn) — nên thêm test
 - [ ] **Backend**: `concat_segments` đang xoá file `concat_*.txt` cũ vô điều kiện trong cleanup — có thể đụng job khác đang chạy cùng lúc
-- [ ] **Frontend**: `localStorage` không version migration — nếu đổi schema sẽ vỡ silently
+- [x] ~~**Frontend**: `localStorage` không version migration~~ — ĐÃ XONG: thêm `version` + backfill `video`
 - [ ] **Frontend**: chưa có toast/notification component — đang reuse `captureStatus` làm chỗ flash message
 - [ ] **Frontend**: `previewClip` watchdog dùng `timeupdate` (~250ms) — có thể trượt cuối clip ~0.2s
 - [ ] **Resolution lock**: hiện đang cap fps ≤ 60 nhưng không cap resolution — video 4K sẽ render rất nặng

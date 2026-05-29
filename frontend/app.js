@@ -10,7 +10,6 @@ const els = {
   player2: $("player2"),
   introSeconds: $("introSeconds"),
   videoSelect: $("videoSelect"),
-  reloadVideos: $("reloadVideos"),
   slowSlider: $("slowSlider"),
   slowLabel: $("slowLabel"),
   slowHint: $("slowHint"),
@@ -25,7 +24,6 @@ const els = {
   timelineProgress: $("timelineProgress"),
   timelineBuffered: $("timelineBuffered"),
   timelineThumb: $("timelineThumb"),
-  timelineMarkers: $("timelineMarkers"),
   timelineTooltip: $("timelineTooltip"),
   playBtn: $("playBtn"),
   playIcon: $("playIcon"),
@@ -62,9 +60,9 @@ const els = {
 };
 
 // ---- State ----------------------------------------------------------
-let clips = [];          // [{id, start, end}]
+let clips = [];          // [{id, start, end, slowmo, video}] — each clip carries its source
 let captureStart = null; // number | null
-let currentVideo = null;
+let currentVideo = null; // video currently loaded in the player (source for NEW clips)
 let videoFps = 30;
 let currentJobId = null;
 let currentEventSource = null;
@@ -72,9 +70,11 @@ let nextClipId = 1;
 
 // ---- Persistence ----------------------------------------------------
 const STORAGE_KEY = "highlight-creator-state-v1";
+const STATE_VERSION = 2; // v2: clips carry a per-clip `video` source
 function saveState() {
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify({
+      version: STATE_VERSION,
       tournament: els.tournament.value,
       player1: els.player1.value,
       player2: els.player2.value,
@@ -95,11 +95,16 @@ function loadState() {
     if (s.player2) els.player2.value = s.player2;
     if (s.introSeconds) els.introSeconds.value = s.introSeconds;
     if (s.slow) { els.slowSlider.value = s.slow; updateSlowLabel(); }
+    if (s.currentVideo) currentVideo = s.currentVideo;
     if (Array.isArray(s.clips)) {
-      clips = s.clips;
+      // Migration v1 -> v2: clips had no `video`; they all belonged to the
+      // single selected video, so backfill with the saved currentVideo.
+      clips = s.clips.map(c => ({
+        ...c,
+        video: c.video || s.currentVideo || "",
+      }));
       nextClipId = Math.max(0, ...clips.map(c => c.id || 0)) + 1;
     }
-    if (s.currentVideo) currentVideo = s.currentVideo;
   } catch (e) { /* ignore */ }
 }
 
@@ -109,6 +114,15 @@ function fmt(seconds) {
   const m = Math.floor(seconds / 60);
   const s = seconds - m * 60;
   return `${String(m).padStart(2, "0")}:${s.toFixed(2).padStart(5, "0")}`;
+}
+
+// Duration as minute:second (rounded), e.g. 90.5 -> "1:30", 45 -> "0:45".
+function fmtClock(seconds) {
+  if (!isFinite(seconds) || seconds < 0) seconds = 0;
+  const total = Math.round(seconds);
+  const m = Math.floor(total / 60);
+  const s = total % 60;
+  return `${m}:${String(s).padStart(2, "0")}`;
 }
 
 function parseTime(str) {
@@ -126,8 +140,10 @@ function parseTime(str) {
 }
 
 // ---- Video list -----------------------------------------------------
-async function loadVideos(autoSelect = true) {
-  els.videoSelect.innerHTML = '<option value="">— Đang tải… —</option>';
+// quiet=true skips the "loading" placeholder and avoids flicker — used when
+// silently re-fetching the list as the user opens the dropdown.
+async function loadVideos(autoSelect = true, quiet = false) {
+  if (!quiet) els.videoSelect.innerHTML = '<option value="">— Đang tải… —</option>';
   try {
     const res = await fetch("/api/videos");
     const data = await res.json();
@@ -145,12 +161,14 @@ async function loadVideos(autoSelect = true) {
       o.textContent = `${v.name}  (${v.size_mb} MB)`;
       els.videoSelect.appendChild(o);
     }
-    if (autoSelect && currentVideo && data.videos.some(v => v.name === currentVideo)) {
+    // Keep the dropdown showing the current video. Only reload the player when
+    // explicitly asked (autoSelect), so a silent refresh doesn't interrupt playback.
+    if (currentVideo && data.videos.some(v => v.name === currentVideo)) {
       els.videoSelect.value = currentVideo;
-      await selectVideo(currentVideo);
+      if (autoSelect) await selectVideo(currentVideo);
     }
   } catch (e) {
-    els.videoSelect.innerHTML = `<option value="">(lỗi tải danh sách)</option>`;
+    if (!quiet) els.videoSelect.innerHTML = `<option value="">(lỗi tải danh sách)</option>`;
   }
 }
 
@@ -213,25 +231,13 @@ function updatePlayBtn() {
   }
 }
 
-function renderTimelineMarkers() {
-  const d = els.player.duration || 0;
-  if (!d) { els.timelineMarkers.innerHTML = ""; return; }
-  els.timelineMarkers.innerHTML = clips.map(c => {
-    const left = (c.start / d) * 100;
-    const width = ((c.end - c.start) / d) * 100;
-    return `<span class="clip-marker" style="left:${left}%;width:${width}%"></span>`;
-  }).join("");
-}
-
 els.player.addEventListener("timeupdate", updatePlayerTime);
 els.player.addEventListener("loadedmetadata", () => {
   updatePlayerTime();
   updateBuffered();
-  renderTimelineMarkers();
 });
 els.player.addEventListener("durationchange", () => {
   updatePlayerTime();
-  renderTimelineMarkers();
 });
 els.player.addEventListener("progress", updateBuffered);
 els.player.addEventListener("play",  updatePlayBtn);
@@ -348,9 +354,26 @@ function flashMsg(msg) {
 
 // ---- Clips list -----------------------------------------------------
 function addClip(start, end) {
-  clips.push({ id: nextClipId++, start, end, slowmo: true });
+  if (!currentVideo) { flashTopMessage("Chọn video nguồn trước khi đánh dấu pha"); return; }
+  // New highlight events default to no slow-motion (SLO unchecked).
+  clips.push({ id: nextClipId++, start, end, slowmo: false, video: currentVideo });
   renderClipsTable();
   saveState();
+}
+
+// Ordered list of distinct source videos used by the clips (first-appearance
+// order). Used to label each clip with a short V1/V2/... badge.
+function sourceList() {
+  const seen = [];
+  for (const c of clips) {
+    const v = c.video || "";
+    if (v && !seen.includes(v)) seen.push(v);
+  }
+  return seen;
+}
+function sourceBadge(video) {
+  const i = sourceList().indexOf(video);
+  return i >= 0 ? `V${i + 1}` : "—";
 }
 
 function removeClip(id) {
@@ -372,22 +395,22 @@ function moveClip(id, dir) {
 function renderClipsTable() {
   els.clipCount.textContent = clips.length;
   if (!clips.length) {
-    els.clipsBody.innerHTML = `<tr class="empty"><td colspan="6">Chưa có pha nào. Bấm <b>Highlight start/end</b> để đánh dấu.</td></tr>`;
-    renderTimelineMarkers();
+    els.clipsBody.innerHTML = `<tr class="empty"><td colspan="7">Chưa có pha nào. Bấm <b>Highlight start/end</b> để đánh dấu.</td></tr>`;
     refreshRenderSummary();
     return;
   }
   els.clipsBody.innerHTML = "";
-  renderTimelineMarkers();
   clips.forEach((c, idx) => {
     const tr = document.createElement("tr");
     const checked = c.slowmo === false ? "" : "checked";
+    const srcVideo = c.video || "";
     tr.innerHTML = `
       <td class="cell-check">
         <input type="checkbox" data-id="${c.id}" data-field="slowmo" ${checked}
                title="Có slow-motion cho pha này (uncheck = chỉ render real-speed)" />
       </td>
       <td>${idx + 1}</td>
+      <td class="src"><span class="src-badge" title="${srcVideo.replace(/"/g, "&quot;")}">${sourceBadge(srcVideo)}</span></td>
       <td><input class="t-input" data-id="${c.id}" data-field="start" value="${fmt(c.start)}" /></td>
       <td><input class="t-input" data-id="${c.id}" data-field="end" value="${fmt(c.end)}" /></td>
       <td class="dur">${(c.end - c.start).toFixed(1)}s</td>
@@ -456,6 +479,21 @@ els.clipsBody.addEventListener("change", (e) => {
 let previewWatchdog = null;
 function previewClip(clip) {
   if (previewWatchdog) { clearTimeout(previewWatchdog); previewWatchdog = null; }
+  // If this clip belongs to a different source than the one loaded, switch the
+  // player to that source first, then seek once the new media is ready.
+  if (clip.video && clip.video !== currentVideo) {
+    const onReady = () => {
+      els.player.removeEventListener("loadeddata", onReady);
+      _playClipRange(clip);
+    };
+    els.player.addEventListener("loadeddata", onReady);
+    selectVideo(clip.video);
+    if (els.videoSelect) els.videoSelect.value = clip.video;
+    return;
+  }
+  _playClipRange(clip);
+}
+function _playClipRange(clip) {
   els.player.currentTime = clip.start;
   els.player.play();
   const stopAt = clip.end;
@@ -483,22 +521,23 @@ function refreshRenderSummary() {
     .reduce((a, c) => a + (c.end - c.start) * factor, 0);
   const slowCount = clips.filter(c => c.slowmo !== false).length;
   const totalOut = intro + totalReal + totalSlow;
-  const ok = clips.length > 0 && currentVideo;
+  const sources = sourceList();
+  const allHaveSource = clips.length > 0 && clips.every(c => c.video);
+  const ok = allHaveSource;
   els.renderBtn.disabled = !ok;
 
-  if (!currentVideo) {
-    els.renderSummary.innerHTML = `Chọn video nguồn để bắt đầu.`;
-    return;
-  }
   if (!clips.length) {
-    els.renderSummary.innerHTML = `Sẵn sàng — thêm pha bóng để bật xuất video.`;
+    els.renderSummary.innerHTML = currentVideo
+      ? `Sẵn sàng — thêm pha bóng để bật xuất video.`
+      : `Chọn video nguồn để bắt đầu.`;
     return;
   }
+  const srcLabel = sources.length > 1 ? ` • <b>${sources.length}</b> video nguồn` : "";
   els.renderSummary.innerHTML = `
-    <b>${clips.length}</b> pha (<b>${slowCount}</b> có slow-mo ${slow}%, ${factor.toFixed(2)}×) •
+    <b>${clips.length}</b> pha (<b>${slowCount}</b> có slow-mo ${slow}%, ${factor.toFixed(2)}×)${srcLabel} •
     intro <b>${intro}s</b> →
-    real <b>${totalReal.toFixed(1)}s</b> + slow-mo <b>${totalSlow.toFixed(1)}s</b> =
-    output ≈ <b>${totalOut.toFixed(1)}s</b>
+    real <b>${fmtClock(totalReal)}</b> + slow-mo <b>${fmtClock(totalSlow)}</b> =
+    output ≈ <b>${fmtClock(totalOut)}</b>
   `;
 }
 
@@ -511,8 +550,8 @@ function currentProjectPayload(name) {
     player2: els.player2.value,
     intro_seconds: parseFloat(els.introSeconds.value || "4"),
     slow_percent: parseInt(els.slowSlider.value, 10),
-    video: currentVideo || "",
-    clips: clips.map(c => ({ start: c.start, end: c.end, slowmo: c.slowmo !== false })),
+    video: currentVideo || (clips[0] && clips[0].video) || "",
+    clips: clips.map(c => ({ start: c.start, end: c.end, slowmo: c.slowmo !== false, video: c.video || "" })),
   };
 }
 
@@ -530,15 +569,19 @@ function applyProjectPayload(p) {
     start: c.start,
     end: c.end,
     slowmo: c.slowmo !== false,
+    // Migration: old projects stored clips without `video` (single-source) -> backfill.
+    video: c.video || p.video || "",
   }));
   renderClipsTable();
-  if (p.video) {
-    const opt = [...els.videoSelect.options].find(o => o.value === p.video);
+  // Load the first source into the player so capture/preview has a context.
+  const firstSource = (clips[0] && clips[0].video) || p.video || "";
+  if (firstSource) {
+    const opt = [...els.videoSelect.options].find(o => o.value === firstSource);
     if (opt) {
-      els.videoSelect.value = p.video;
-      selectVideo(p.video);
+      els.videoSelect.value = firstSource;
+      selectVideo(firstSource);
     } else {
-      flashTopMessage(`Video "${p.video}" không có trong workspace/raw`);
+      flashTopMessage(`Video "${firstSource}" không có trong workspace/raw`);
     }
   }
   saveState();
@@ -644,7 +687,8 @@ function flashTopMessage(msg) {
 
 // ---- Render ---------------------------------------------------------
 async function exportSingleClip(clip, includeSlowmo) {
-  if (!currentVideo) {
+  const clipVideo = clip.video || currentVideo;
+  if (!clipVideo) {
     alert("Hãy chọn video trước");
     return;
   }
@@ -666,7 +710,7 @@ async function exportSingleClip(clip, includeSlowmo) {
 
   try {
     const body = {
-      video: currentVideo,
+      video: clipVideo,
       start: clip.start,
       end: clip.end,
       include_slowmo: !!includeSlowmo,
@@ -691,11 +735,15 @@ async function exportSingleClip(clip, includeSlowmo) {
 }
 
 async function startRender() {
-  if (!currentVideo || !clips.length) return;
+  if (!clips.length) return;
   // Validate clips
   for (const c of clips) {
     if (!(c.end > c.start)) {
       alert("Clip không hợp lệ — kiểm tra Start/End.");
+      return;
+    }
+    if (!c.video) {
+      alert("Có pha chưa gắn video nguồn — xoá và đánh dấu lại.");
       return;
     }
   }
@@ -709,8 +757,8 @@ async function startRender() {
 
   try {
     const body = {
-      video: currentVideo,
-      clips: clips.map(c => ({ start: c.start, end: c.end, slowmo: c.slowmo !== false })),
+      video: currentVideo || (clips[0] && clips[0].video) || "",
+      clips: clips.map(c => ({ start: c.start, end: c.end, slowmo: c.slowmo !== false, video: c.video })),
       slow_percent: parseInt(els.slowSlider.value, 10),
       intro_seconds: parseFloat(els.introSeconds.value || "0"),
       tournament: els.tournament.value,
@@ -788,7 +836,8 @@ async function cancelRender() {
 }
 
 // ---- Wire up --------------------------------------------------------
-els.reloadVideos.addEventListener("click", () => loadVideos(false));
+// Auto-refresh the source list each time the dropdown is opened (no manual button).
+els.videoSelect.addEventListener("mousedown", () => loadVideos(false, true));
 els.videoSelect.addEventListener("change", (e) => selectVideo(e.target.value));
 els.slowSlider.addEventListener("input", updateSlowLabel);
 els.introSeconds.addEventListener("change", () => { saveState(); refreshRenderSummary(); });

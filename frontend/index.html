@@ -58,11 +58,9 @@
       <label>Intro (giây)
         <input id="introSeconds" type="number" min="0" max="15" step="0.5" value="4" />
       </label>
-      <label>Video nguồn
-        <div class="row">
-          <select id="videoSelect"></select>
-          <button id="reloadVideos" type="button" title="Refresh">↻</button>
-        </div>
+      <label>Video nguồn (đang xem)
+        <select id="videoSelect" title="Mở dropdown để tự làm mới danh sách"></select>
+        <small class="hint">Đổi video để thêm pha từ nhiều nguồn — các pha tích luỹ chung vào 1 output.</small>
       </label>
       <label>Slow-motion: <span id="slowLabel">50%</span>
         <input id="slowSlider" type="range" min="10" max="100" step="5" value="50" />
@@ -73,7 +71,7 @@
 
   <!-- B. PLAYER -------------------------------------------------------- -->
   <section class="card player-card">
-    <h2>2 · Player &amp; Capture</h2>
+    <h2>2 · Player &amp; Mark</h2>
 
     <div class="player-wrap">
       <video id="player" preload="metadata" playsinline></video>
@@ -85,7 +83,6 @@
       <div class="timeline-track">
         <div class="timeline-buffered" id="timelineBuffered"></div>
         <div class="timeline-progress" id="timelineProgress"></div>
-        <div class="timeline-markers" id="timelineMarkers"></div>
         <div class="timeline-thumb" id="timelineThumb"></div>
       </div>
       <div class="timeline-tooltip" id="timelineTooltip">00:00</div>
@@ -146,6 +143,7 @@
         <colgroup>
           <col class="col-check" />
           <col class="col-num" />
+          <col class="col-src" />
           <col class="col-time" />
           <col class="col-time" />
           <col class="col-dur" />
@@ -155,6 +153,7 @@
           <tr>
             <th title="Có slow-motion (uncheck = chỉ render real-speed)">SLO</th>
             <th>#</th>
+            <th title="Video nguồn của pha">Nguồn</th>
             <th>Start</th>
             <th>End</th>
             <th>Dur</th>
@@ -162,7 +161,7 @@
           </tr>
         </thead>
         <tbody id="clipsBody">
-          <tr class="empty"><td colspan="6">Chưa có pha nào.</td></tr>
+          <tr class="empty"><td colspan="7">Chưa có pha nào.</td></tr>
         </tbody>
       </table>
     </div>

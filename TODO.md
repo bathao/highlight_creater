@@ -57,10 +57,6 @@
   - Cache vào `workspace/temp/thumb_{video}_{ms}.jpg`
   - Endpoint mới `/api/thumb/{video}?t=...`
 
-- [ ] **localStorage migration** ([frontend/app.js:74](frontend/app.js#L74))
-  - Hiện `STORAGE_KEY = "highlight-creator-state-v1"` chưa có migration
-  - Đổi schema → state cũ vỡ silently (try/catch nuốt lỗi)
-  - Thêm `version` field, migration logic
 
 - [ ] **Toast/notification component** riêng
   - Hiện đang reuse `captureStatus` làm flash message (`flashTopMessage`)
@@ -81,9 +77,6 @@
   - Hiện dùng `timeupdate` event (~250ms granularity) → có thể trượt cuối clip ~0.2s
   - Thử `requestVideoFrameCallback` (Chrome) hoặc setInterval 50ms
 
-- [ ] **Multi-video timeline** — chọn nhiều video nguồn cho 1 highlight
-  - Phải xử lý normalize fps/resolution giữa các video khác nhau
-  - UI: chọn video cho từng clip (column mới trong bảng)
 
 - [ ] **Export preset**: Instagram (9:16), YouTube (16:9), TikTok (9:16 + 60s cap)
   - Auto crop/letterbox tuỳ preset
@@ -119,3 +112,12 @@
 > Xem chi tiết ở [progress.md § Tính năng đã hoàn thành](progress.md#2-tính-năng-đã-hoàn-thành).
 
 Tóm tắt: full pipeline render (intro + real + slow-mo + concat), NVENC, byte-range streaming, SSE progress, project CRUD, custom timeline + control bar, keyboard shortcuts, auto-persist state, single-clip export, launcher 1-click `start.bat`.
+
+**2026-05-29:**
+- **Multi-source input** — ghép pha highlight từ nhiều video nguồn vào 1 output. Mỗi clip mang `video` riêng;
+  backend probe từng nguồn, canvas = video đầu tiên, scale giữ aspect + letterbox + `setsar=1` để concat `-c copy`
+  chạy được dù video khác độ phân giải/fps/tỉ lệ; audio đồng nhất (`anullsrc` cho nguồn câm).
+  UI: cột "Nguồn" (badge V1/V2…), preview tự chuyển nguồn, đổi video để tích luỹ pha.
+  Đã verify: ghép 2688×1512@60 + 1280×720@90 → 1 clip 2688×1512 đồng nhất (ffprobe).
+- **localStorage migration v1→v2** — thêm `version` field + backfill `video` cho clip cũ.
+- Fix: map stream rõ ràng `0:v:0`/`0:a:0` (nguồn có >1 video stream như file 3-1 trước đây làm vỡ mp4 muxer).

@@ -231,6 +231,7 @@ class ProjectClip(BaseModel):
     start: float
     end: float
     slowmo: bool = True
+    video: str = ""  # source video for this clip (multi-source projects)
 
 
 class ProjectPayload(BaseModel):
@@ -308,10 +309,11 @@ class ClipModel(BaseModel):
     start: float = Field(ge=0)
     end: float = Field(gt=0)
     slowmo: bool = True
+    video: str = ""  # source video for this clip; falls back to RenderRequest.video
 
 
 class RenderRequest(BaseModel):
-    video: str
+    video: str = ""  # fallback source for clips that don't specify their own
     clips: List[ClipModel]
     slow_percent: int = Field(ge=10, le=100, default=50)  # 50 = play at 50% speed
     intro_seconds: float = Field(ge=0, le=15, default=4.0)
@@ -339,7 +341,8 @@ async def export_clip(req: ExportClipRequest) -> JSONResponse:
         raise HTTPException(400, "Invalid clip range")
     video_path = _safe_raw_path(req.video)
 
-    clip = render.Clip(start=req.start, end=req.end, slowmo=req.include_slowmo)
+    clip = render.Clip(start=req.start, end=req.end, slowmo=req.include_slowmo,
+                       video_path=video_path)
 
     stem = Path(req.video).stem
     raw_label = req.label.strip() or f"t{req.start:.1f}-t{req.end:.1f}"
@@ -370,18 +373,32 @@ async def start_render(req: RenderRequest) -> JSONResponse:
     if not req.clips:
         raise HTTPException(400, "No clips selected")
 
-    video_path = _safe_raw_path(req.video)
+    # Resolve each clip's source video (multi-source). A clip uses its own
+    # `video`, falling back to the request-level `video`. Validate + sandbox
+    # every distinct path via _safe_raw_path. Cache resolved paths per name.
+    resolved: dict = {}
 
-    # Validate clip ranges
+    def resolve(name: str) -> Path:
+        name = (name or "").strip()
+        if not name:
+            raise HTTPException(400, "Clip thiếu video nguồn")
+        if name not in resolved:
+            resolved[name] = _safe_raw_path(name)
+        return resolved[name]
+
+    # Validate clip ranges + sources
     clips = []
     for c in req.clips:
         if c.end <= c.start:
             raise HTTPException(400, f"Invalid clip {c.start}-{c.end}")
-        clips.append(render.Clip(start=c.start, end=c.end, slowmo=c.slowmo))
+        src = resolve(c.video or req.video)
+        clips.append(render.Clip(start=c.start, end=c.end, slowmo=c.slowmo,
+                                 video_path=src))
 
+    # video_path on the job is just a fallback; use the first clip's source.
     job = render.RenderJob(
         job_id=uuid.uuid4().hex[:12],
-        video_path=video_path,
+        video_path=clips[0].video_path,
         clips=clips,
         slow_ratio=req.slow_percent / 100.0,
         intro_seconds=req.intro_seconds,
