@@ -1,0 +1,27 @@
+# Python
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# Workspace runtime data (media + generated state, not source)
+workspace/raw/*
+workspace/output/*
+workspace/temp/*
+workspace/projects/*
+workspace/jobs/*
+!workspace/raw/.gitkeep
+!workspace/output/.gitkeep
+!workspace/temp/.gitkeep
+!workspace/projects/.gitkeep
+
+# Slow-motion audio asset (large binary; ship separately)
+sounds/*.mp3
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
