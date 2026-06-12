@@ -113,6 +113,11 @@ class RenderJob:
     # the tournament-derived default. Used by single-clip export.
     output_basename: Optional[str] = None
 
+    # Target output height (px). 0 = keep the source canvas height (native).
+    # When 0 < out_height < source height, the canvas is downscaled to this
+    # height (aspect preserved). Never upscales. Frontend caps choices at 1440.
+    out_height: int = 0
+
     # progress state
     status: str = "pending"     # pending | running | done | error
     percent: float = 0.0
@@ -584,6 +589,16 @@ def run_job(job: RenderJob) -> None:
         # Cap fps at 60 for slow-mo headroom; concat needs uniform timing.
         if fps > 60:
             fps = 60.0
+
+        # Optional output downscale: shrink the canvas to the requested height
+        # (aspect preserved, even dimensions). Only ever downscales — picking a
+        # height >= source is treated as native. Every segment is scaled onto
+        # this canvas by _video_filter, so this alone resizes the whole output.
+        if job.out_height and 0 < job.out_height < height:
+            new_h = job.out_height - (job.out_height % 2)
+            new_w = round(width * new_h / height)
+            new_w -= new_w % 2
+            width, height = max(2, new_w), max(2, new_h)
 
         # If ANY source has audio, every segment must carry an audio track so the
         # final concat -c copy has a consistent stream layout. Silent sources get

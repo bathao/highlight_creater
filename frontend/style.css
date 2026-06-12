@@ -522,6 +522,14 @@ input[type="range"] {
   font-size: 13px;
 }
 
+/* Output resolution picker */
+.res-row {
+  display: flex; flex-direction: column; gap: 6px;
+  font-size: 12px; color: #8b94a7; text-transform: uppercase; letter-spacing: 0.5px;
+  margin-bottom: 12px;
+}
+.res-row select:disabled { opacity: 0.6; cursor: not-allowed; }
+
 .progress {
   margin-top: 16px;
   padding: 14px 16px;

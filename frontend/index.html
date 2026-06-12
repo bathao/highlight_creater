@@ -172,6 +172,13 @@
     <h2>4 · Xuất Video</h2>
     <div class="render-summary" id="renderSummary">Sẵn sàng — thêm pha bóng để bật xuất video.</div>
 
+    <label class="res-row">Độ phân giải xuất
+      <select id="resolutionSelect" title="Chọn độ phân giải output — tối đa = độ phân giải video nguồn">
+        <option value="0">Auto</option>
+      </select>
+      <small class="hint" id="resHint">Tối đa bằng độ phân giải video nguồn (không phóng to).</small>
+    </label>
+
     <button id="renderBtn" class="btn render" disabled>
       <svg class="render-icon" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
         <polygon points="5 3 19 12 5 21 5 3"></polygon>

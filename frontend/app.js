@@ -46,6 +46,8 @@ const els = {
 
   renderBtn: $("renderBtn"),
   renderSummary: $("renderSummary"),
+  resolutionSelect: $("resolutionSelect"),
+  resHint: $("resHint"),
   progressBox: $("progressBox"),
   progressStage: $("progressStage"),
   progressPct: $("progressPct"),
@@ -67,6 +69,17 @@ let videoFps = 30;
 let currentJobId = null;
 let currentEventSource = null;
 let nextClipId = 1;
+let outHeight = 0;        // target output height (px); 0 = native source height
+const probeCache = {};   // video name -> probe info {width,height,fps,...}
+
+// Standard output tiers. The export dropdown offers every tier whose height is
+// <= the canvas source height (so we never upscale); the top tier doubles as
+// "native". A source above 1440p (e.g. 4K) tops out at 2K to keep renders sane.
+const RES_TIERS = [
+  { h: 720,  label: "720p" },
+  { h: 1080, label: "1K · 1080p" },
+  { h: 1440, label: "2K · 1440p" },
+];
 
 // ---- Persistence ----------------------------------------------------
 const STORAGE_KEY = "highlight-creator-state-v1";
@@ -80,6 +93,7 @@ function saveState() {
       player2: els.player2.value,
       introSeconds: els.introSeconds.value,
       slow: els.slowSlider.value,
+      outHeight,
       currentVideo,
       clips,
     }));
@@ -95,6 +109,7 @@ function loadState() {
     if (s.player2) els.player2.value = s.player2;
     if (s.introSeconds) els.introSeconds.value = s.introSeconds;
     if (s.slow) { els.slowSlider.value = s.slow; updateSlowLabel(); }
+    if (typeof s.outHeight === "number") outHeight = s.outHeight;
     if (s.currentVideo) currentVideo = s.currentVideo;
     if (Array.isArray(s.clips)) {
       // Migration v1 -> v2: clips had no `video`; they all belonged to the
@@ -172,12 +187,28 @@ async function loadVideos(autoSelect = true, quiet = false) {
   }
 }
 
+// Probe a video's metadata, caching the result so repeated lookups (resolution
+// menu, summary) don't re-hit the server.
+async function probeVideo(name) {
+  if (!name) return null;
+  if (probeCache[name]) return probeCache[name];
+  try {
+    const res = await fetch(`/api/probe/${encodeURIComponent(name)}`);
+    const info = await res.json();
+    probeCache[name] = info;
+    return info;
+  } catch (e) {
+    return null;
+  }
+}
+
 async function selectVideo(name) {
   if (!name) {
     els.player.removeAttribute("src");
     els.player.load();
     els.overlay.classList.remove("hidden");
     els.playerInfo.textContent = "Chưa chọn video";
+    refreshResolutionOptions();
     return;
   }
   currentVideo = name;
@@ -186,15 +217,81 @@ async function selectVideo(name) {
   els.player.load();
   els.overlay.classList.add("hidden");
   // Probe for fps / resolution
-  try {
-    const res = await fetch(`/api/probe/${encodeURIComponent(name)}`);
-    const info = await res.json();
+  const info = await probeVideo(name);
+  if (info) {
     videoFps = info.fps || 30;
     els.playerInfo.textContent = `${info.width}×${info.height} @ ${videoFps} fps`;
-  } catch (e) {
+  } else {
     els.playerInfo.textContent = "";
   }
+  refreshResolutionOptions();
   saveState();
+}
+
+// The canvas source = first clip's video (run_job uses clip[0] for the canvas),
+// or the currently loaded video when no clips exist yet.
+function canvasSourceVideo() {
+  return (clips[0] && clips[0].video) || currentVideo || "";
+}
+
+// Short label for a target height, used in the render summary.
+function resShortLabel(h) {
+  if (!h) return "gốc";
+  if (h <= 720) return "720p";
+  if (h <= 1080) return "1K";
+  return "2K";
+}
+
+// Rebuild the resolution dropdown from the canvas source's height. Offers every
+// standard tier <= source height; the selection caps output resolution and is
+// clamped server-side so it never upscales.
+async function refreshResolutionOptions() {
+  const sel = els.resolutionSelect;
+  if (!sel) return;
+  const src = canvasSourceVideo();
+  if (!src) {
+    sel.innerHTML = `<option value="0">Auto — chọn video nguồn</option>`;
+    sel.value = "0";
+    sel.disabled = true;
+    return;
+  }
+  const info = await probeVideo(src);
+  // Source may have changed while awaiting the probe.
+  if (canvasSourceVideo() !== src) return;
+  const srcH = (info && info.height) ? info.height : 0;
+  const avail = RES_TIERS.filter(t => t.h <= srcH + 1);
+
+  sel.innerHTML = "";
+  if (!avail.length) {
+    // Source smaller than 720p: single native option, no downscale possible.
+    const o = document.createElement("option");
+    o.value = "0";
+    o.textContent = srcH ? `Auto · gốc ${srcH}p` : "Auto · gốc";
+    sel.appendChild(o);
+    sel.value = "0";
+    sel.disabled = true;
+    outHeight = 0;
+    saveState();
+    refreshRenderSummary();
+    return;
+  }
+
+  sel.disabled = avail.length === 1;
+  for (const t of avail) {
+    const o = document.createElement("option");
+    o.value = String(t.h);
+    o.textContent = t.h >= srcH ? `${t.label} · gốc` : t.label;
+    sel.appendChild(o);
+  }
+  // Keep the previous choice if still valid; otherwise default to the highest
+  // available tier (native / best quality) — preserves prior full-res behaviour.
+  const heights = avail.map(t => t.h);
+  outHeight = (outHeight && heights.includes(outHeight))
+    ? outHeight
+    : heights[heights.length - 1];
+  sel.value = String(outHeight);
+  saveState();
+  refreshRenderSummary();
 }
 
 // ---- Player ---------------------------------------------------------
@@ -358,6 +455,7 @@ function addClip(start, end) {
   // New highlight events default to no slow-motion (SLO unchecked).
   clips.push({ id: nextClipId++, start, end, slowmo: false, video: currentVideo });
   renderClipsTable();
+  refreshResolutionOptions();
   saveState();
 }
 
@@ -379,6 +477,7 @@ function sourceBadge(video) {
 function removeClip(id) {
   clips = clips.filter(c => c.id !== id);
   renderClipsTable();
+  refreshResolutionOptions();
   saveState();
 }
 
@@ -389,6 +488,7 @@ function moveClip(id, dir) {
   if (j < 0 || j >= clips.length) return;
   [clips[i], clips[j]] = [clips[j], clips[i]];
   renderClipsTable();
+  refreshResolutionOptions();  // reorder may change clip[0] = the canvas source
   saveState();
 }
 
@@ -537,7 +637,7 @@ function refreshRenderSummary() {
     <b>${clips.length}</b> pha (<b>${slowCount}</b> có slow-mo ${slow}%, ${factor.toFixed(2)}×)${srcLabel} •
     intro <b>${intro}s</b> →
     real <b>${fmtClock(totalReal)}</b> + slow-mo <b>${fmtClock(totalSlow)}</b> =
-    output ≈ <b>${fmtClock(totalOut)}</b>
+    output ≈ <b>${fmtClock(totalOut)}</b> @ <b>${resShortLabel(outHeight)}</b>
   `;
 }
 
@@ -573,6 +673,7 @@ function applyProjectPayload(p) {
     video: c.video || p.video || "",
   }));
   renderClipsTable();
+  refreshResolutionOptions();
   // Load the first source into the player so capture/preview has a context.
   const firstSource = (clips[0] && clips[0].video) || p.video || "";
   if (firstSource) {
@@ -716,6 +817,7 @@ async function exportSingleClip(clip, includeSlowmo) {
       include_slowmo: !!includeSlowmo,
       slow_percent: parseInt(els.slowSlider.value, 10),
       label: `clip${idx}`,
+      out_height: outHeight || 0,
     };
     const res = await fetch("/api/export-clip", {
       method: "POST",
@@ -764,6 +866,7 @@ async function startRender() {
       tournament: els.tournament.value,
       player1: els.player1.value,
       player2: els.player2.value,
+      out_height: outHeight || 0,
     };
     const res = await fetch("/api/render", {
       method: "POST",
@@ -840,6 +943,11 @@ async function cancelRender() {
 els.videoSelect.addEventListener("mousedown", () => loadVideos(false, true));
 els.videoSelect.addEventListener("change", (e) => selectVideo(e.target.value));
 els.slowSlider.addEventListener("input", updateSlowLabel);
+els.resolutionSelect.addEventListener("change", (e) => {
+  outHeight = parseInt(e.target.value, 10) || 0;
+  saveState();
+  refreshRenderSummary();
+});
 els.introSeconds.addEventListener("change", () => { saveState(); refreshRenderSummary(); });
 els.tournament.addEventListener("change", saveState);
 els.player1.addEventListener("change", saveState);
@@ -858,7 +966,7 @@ els.projectName.addEventListener("keydown", (e) => {
 els.clearClips.addEventListener("click", () => {
   if (!clips.length) return;
   if (!confirm("Xoá tất cả các pha?")) return;
-  clips = []; renderClipsTable(); saveState();
+  clips = []; renderClipsTable(); refreshResolutionOptions(); saveState();
 });
 
 els.renderBtn.addEventListener("click", startRender);
@@ -927,6 +1035,7 @@ document.addEventListener("keydown", (e) => {
   renderClipsTable();
   updatePlayBtn();
   await Promise.all([loadVideos(true), loadProjectList()]);
+  refreshResolutionOptions();
   refreshRenderSummary();
 })();
 

@@ -320,6 +320,7 @@ class RenderRequest(BaseModel):
     tournament: str = ""
     player1: str = ""
     player2: str = ""
+    out_height: int = Field(ge=0, le=2160, default=0)  # 0 = native source height
 
 
 class ExportClipRequest(BaseModel):
@@ -329,6 +330,7 @@ class ExportClipRequest(BaseModel):
     include_slowmo: bool = False
     slow_percent: int = Field(ge=10, le=100, default=50)
     label: str = ""
+    out_height: int = Field(ge=0, le=2160, default=0)  # 0 = native source height
 
 
 @app.post("/api/export-clip")
@@ -360,6 +362,7 @@ async def export_clip(req: ExportClipRequest) -> JSONResponse:
         player1="",
         player2="",
         output_basename=output_basename,
+        out_height=req.out_height,
     )
     render.register_job(job)
 
@@ -405,6 +408,7 @@ async def start_render(req: RenderRequest) -> JSONResponse:
         tournament=req.tournament,
         player1=req.player1,
         player2=req.player2,
+        out_height=req.out_height,
     )
     render.register_job(job)
 
