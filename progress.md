@@ -1,7 +1,8 @@
 # Highlight Creator — Tiến độ dự án
 
-> Cập nhật: 2026-05-29 (multi-source input — ghép pha từ nhiều video nguồn vào 1 output)
-> Trước đó: 2026-05-14 (thêm nhạc nền cho slow-motion)
+> Cập nhật: 2026-05-31 (v1.1 — multi-source input + UI refinements, đã commit `ed85265`)
+> Trước đó: 2026-05-29 (multi-source input — ghép pha từ nhiều video nguồn vào 1 output)
+> Trước nữa: 2026-05-14 (thêm nhạc nền cho slow-motion)
 > Web app local (FastAPI + Vanilla JS) để tạo video highlight từ video gốc, với intro card và slow-motion replay, dùng NVENC (RTX) để render nhanh.
 
 ---
@@ -57,17 +58,18 @@ highlight_creator/
 
 ### Frontend
 - [x] Layout 3-cột responsive (Setup · Player+Clips · Render) ([frontend/style.css:56-75](frontend/style.css#L56-L75))
-- [x] **Custom timeline** với buffered/progress/thumb/tooltip + clip markers ([frontend/index.html:84-92](frontend/index.html#L84-L92))
+- [x] **Custom timeline** với buffered/progress/thumb/tooltip ([frontend/index.html:84-92](frontend/index.html#L84-L92)) — đã **bỏ clip markers vàng** ở v1.1 (sai vị trí khi pha đến từ nhiều nguồn khác nhau)
 - [x] **Custom control bar**: ±5/10/20s, play/pause, speed select (0.25×–2×), highlight toggle ([frontend/index.html:95-127](frontend/index.html#L95-L127))
+- [x] **Setup card** — dropdown video tự refresh khi mở (đã bỏ nút refresh thủ công ở v1.1); section 2 đổi tên "Player & Capture" → **"Player & Mark"** ([frontend/index.html:74](frontend/index.html#L74))
 - [x] **Keyboard shortcuts**: Space, ←/→, Shift+←/→, `,`/`.` (frame-by-frame), I/O (mark in/out), Ctrl+S (save) ([frontend/app.js:825-890](frontend/app.js#L825-L890))
 - [x] **Capture flow** 1 nút toggle (start → end) ([frontend/app.js:306-340](frontend/app.js#L306-L340))
 - [x] **Clip table** edit inline thời gian, ↑/↓ reorder, xoá, preview, export riêng ([frontend/app.js:382-409](frontend/app.js#L382-L409))
-- [x] **Slow-mo per clip** (checkbox SLO) — bỏ chọn = chỉ render real-speed ([frontend/app.js:426-438](frontend/app.js#L426-L438))
+- [x] **Slow-mo per clip** (checkbox SLO) — bỏ chọn = chỉ render real-speed; pha mới mặc định **slow-mo OFF** từ v1.1 ([frontend/app.js:359](frontend/app.js#L359), [405](frontend/app.js#L405))
 - [x] **Project save/load UI** với validate tên, confirm overwrite ([frontend/app.js:570-633](frontend/app.js#L570-L633))
 - [x] **Multi-source UI** — đổi video để thêm pha từ nhiều nguồn; mỗi pha gắn `video` + badge `V1/V2…` cột "Nguồn"; preview tự chuyển player sang đúng nguồn ([frontend/app.js:350-395](frontend/app.js#L350-L395), [457-490](frontend/app.js#L457-L490))
 - [x] **Auto-persist state** vào `localStorage` (tournament, VĐV, slow %, clips kèm nguồn, video đang chọn) + **migration v1→v2** (backfill `video` cho clip cũ) ([frontend/app.js:74-114](frontend/app.js#L74-L114))
 - [x] **SSE listener** + progress bar có shimmer, error state ([frontend/app.js:737-781](frontend/app.js#L737-L781))
-- [x] **Render summary** real-time: tổng pha, slow-mo, intro, output ≈ Ns ([frontend/app.js:476-503](frontend/app.js#L476-L503))
+- [x] **Render summary** real-time: tổng pha, slow-mo, intro, output — hiển thị dạng **phút:giây** (`fmtClock`) thay vì giây thô từ v1.1 ([frontend/app.js:519-541](frontend/app.js#L519-L541))
 
 ### DevOps / Launcher
 - [x] `start.bat` 1-click: auto tạo venv, cài deps, kiểm tra ffmpeg, free port :8770, mở browser ([start.bat:1-127](start.bat#L1-L127))
