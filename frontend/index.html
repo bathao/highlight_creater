@@ -59,8 +59,11 @@
         <input id="introSeconds" type="number" min="0" max="15" step="0.5" value="4" />
       </label>
       <label>Video nguồn (đang xem)
-        <select id="videoSelect" title="Mở dropdown để tự làm mới danh sách"></select>
-        <small class="hint">Đổi video để thêm pha từ nhiều nguồn — các pha tích luỹ chung vào 1 output.</small>
+        <button id="pickVideoBtn" type="button" class="btn pick-video" title="Chọn video từ ổ đĩa/thư mục bất kỳ">
+          <span class="pick-icon">📂</span>
+          <span id="pickVideoLabel" class="pick-label">Chọn video nguồn…</span>
+        </button>
+        <small class="hint">Chọn từ bất kỳ ổ đĩa/thư mục nào — xử lý trực tiếp, không cần copy vào workspace. Đổi video để thêm pha từ nhiều nguồn.</small>
       </label>
       <label>Slow-motion: <span id="slowLabel">50%</span>
         <input id="slowSlider" type="range" min="10" max="100" step="5" value="50" />
@@ -216,6 +219,28 @@
   </section>
 
 </main>
+
+<!-- File browser modal: pick a source video from any drive/folder ------- -->
+<div id="browseModal" class="modal hidden" aria-hidden="true">
+  <div class="modal-backdrop" id="browseBackdrop"></div>
+  <div class="modal-box" role="dialog" aria-label="Chọn video nguồn">
+    <div class="modal-head">
+      <h3>📂 Chọn video nguồn</h3>
+      <button id="browseClose" type="button" class="modal-close" title="Đóng (Esc)">✕</button>
+    </div>
+
+    <div class="browse-bar">
+      <button id="browseUp" type="button" class="btn small" title="Lên thư mục cha">↑</button>
+      <input id="browsePath" type="text" spellcheck="false" autocomplete="off"
+             placeholder="Dán đường dẫn… (VD: D:\Videos\match.mp4)" />
+      <button id="browseGo" type="button" class="btn small primary">Đi</button>
+    </div>
+
+    <div class="browse-shortcuts" id="browseShortcuts"></div>
+    <div class="browse-list" id="browseList"></div>
+    <div class="browse-status muted" id="browseStatus"></div>
+  </div>
+</div>
 
 <script src="/static/app.js"></script>
 </body>

@@ -9,7 +9,8 @@ const els = {
   player1: $("player1"),
   player2: $("player2"),
   introSeconds: $("introSeconds"),
-  videoSelect: $("videoSelect"),
+  pickVideoBtn: $("pickVideoBtn"),
+  pickVideoLabel: $("pickVideoLabel"),
   slowSlider: $("slowSlider"),
   slowLabel: $("slowLabel"),
   slowHint: $("slowHint"),
@@ -59,6 +60,17 @@ const els = {
   resultFilename: $("resultFilename"),
   openFolderBtn: $("openFolderBtn"),
   newRenderBtn: $("newRenderBtn"),
+
+  // File browser modal
+  browseModal: $("browseModal"),
+  browseBackdrop: $("browseBackdrop"),
+  browseClose: $("browseClose"),
+  browseUp: $("browseUp"),
+  browsePath: $("browsePath"),
+  browseGo: $("browseGo"),
+  browseShortcuts: $("browseShortcuts"),
+  browseList: $("browseList"),
+  browseStatus: $("browseStatus"),
 };
 
 // ---- State ----------------------------------------------------------
@@ -70,7 +82,16 @@ let currentJobId = null;
 let currentEventSource = null;
 let nextClipId = 1;
 let outHeight = 0;        // target output height (px); 0 = native source height
-const probeCache = {};   // video name -> probe info {width,height,fps,...}
+let lastBrowseDir = "";  // last folder opened in the file browser (persisted)
+const probeCache = {};   // video path -> probe info {width,height,fps,...}
+
+// Filename (tail) of an absolute path or bare name; used for compact display.
+function baseName(p) {
+  if (!p) return "";
+  const s = String(p).replace(/[\\/]+$/, "");
+  const i = Math.max(s.lastIndexOf("\\"), s.lastIndexOf("/"));
+  return i >= 0 ? s.slice(i + 1) : s;
+}
 
 // Standard output tiers. The export dropdown offers every tier whose height is
 // <= the canvas source height (so we never upscale); the top tier doubles as
@@ -94,6 +115,7 @@ function saveState() {
       introSeconds: els.introSeconds.value,
       slow: els.slowSlider.value,
       outHeight,
+      lastBrowseDir,
       currentVideo,
       clips,
     }));
@@ -110,6 +132,7 @@ function loadState() {
     if (s.introSeconds) els.introSeconds.value = s.introSeconds;
     if (s.slow) { els.slowSlider.value = s.slow; updateSlowLabel(); }
     if (typeof s.outHeight === "number") outHeight = s.outHeight;
+    if (typeof s.lastBrowseDir === "string") lastBrowseDir = s.lastBrowseDir;
     if (s.currentVideo) currentVideo = s.currentVideo;
     if (Array.isArray(s.clips)) {
       // Migration v1 -> v2: clips had no `video`; they all belonged to the
@@ -154,78 +177,143 @@ function parseTime(str) {
   return parseFloat(str);
 }
 
-// ---- Video list -----------------------------------------------------
-// quiet=true skips the "loading" placeholder and avoids flicker — used when
-// silently re-fetching the list as the user opens the dropdown.
-async function loadVideos(autoSelect = true, quiet = false) {
-  if (!quiet) els.videoSelect.innerHTML = '<option value="">— Đang tải… —</option>';
-  try {
-    const res = await fetch("/api/videos");
-    const data = await res.json();
-    els.videoSelect.innerHTML = "";
-    if (!data.videos.length) {
-      els.videoSelect.innerHTML = `<option value="">(thư mục raw trống — bỏ video vào ${data.raw_dir})</option>`;
-      return;
-    }
-    const opt0 = document.createElement("option");
-    opt0.value = ""; opt0.textContent = "— Chọn video —";
-    els.videoSelect.appendChild(opt0);
-    for (const v of data.videos) {
-      const o = document.createElement("option");
-      o.value = v.name;
-      o.textContent = `${v.name}  (${v.size_mb} MB)`;
-      els.videoSelect.appendChild(o);
-    }
-    // Keep the dropdown showing the current video. Only reload the player when
-    // explicitly asked (autoSelect), so a silent refresh doesn't interrupt playback.
-    if (currentVideo && data.videos.some(v => v.name === currentVideo)) {
-      els.videoSelect.value = currentVideo;
-      if (autoSelect) await selectVideo(currentVideo);
-    }
-  } catch (e) {
-    if (!quiet) els.videoSelect.innerHTML = `<option value="">(lỗi tải danh sách)</option>`;
-  }
-}
+// ---- Source video (absolute path anywhere on disk) ------------------
+// A source is identified by its absolute path. Legacy clips/projects may carry
+// a bare filename; the server resolves those under workspace/raw. Both flow
+// through the same path-based endpoints, so no client-side migration is needed.
 
-// Probe a video's metadata, caching the result so repeated lookups (resolution
+// Probe a video's metadata, caching by path so repeated lookups (resolution
 // menu, summary) don't re-hit the server.
-async function probeVideo(name) {
-  if (!name) return null;
-  if (probeCache[name]) return probeCache[name];
+async function probeVideo(path) {
+  if (!path) return null;
+  if (probeCache[path]) return probeCache[path];
   try {
-    const res = await fetch(`/api/probe/${encodeURIComponent(name)}`);
+    const res = await fetch(`/api/source-probe?path=${encodeURIComponent(path)}`);
+    if (!res.ok) return null;
     const info = await res.json();
-    probeCache[name] = info;
+    probeCache[path] = info;
     return info;
   } catch (e) {
     return null;
   }
 }
 
-async function selectVideo(name) {
-  if (!name) {
+// Update the picker button to show the current source filename (full path on hover).
+function updatePickLabel() {
+  if (!els.pickVideoLabel) return;
+  els.pickVideoLabel.textContent = currentVideo ? baseName(currentVideo) : "Chọn video nguồn…";
+  els.pickVideoBtn.title = currentVideo || "Chọn video từ ổ đĩa/thư mục bất kỳ";
+}
+
+async function selectVideo(path) {
+  if (!path) {
+    currentVideo = null;
     els.player.removeAttribute("src");
     els.player.load();
     els.overlay.classList.remove("hidden");
     els.playerInfo.textContent = "Chưa chọn video";
+    updatePickLabel();
     refreshResolutionOptions();
     return;
   }
-  currentVideo = name;
-  els.player.src = `/api/stream/${encodeURIComponent(name)}`;
+  currentVideo = path;
+  els.player.src = `/api/source-stream?path=${encodeURIComponent(path)}`;
   els.player.playbackRate = parseFloat(els.speedSelect.value) || 1;
   els.player.load();
   els.overlay.classList.add("hidden");
+  updatePickLabel();
   // Probe for fps / resolution
-  const info = await probeVideo(name);
+  const info = await probeVideo(path);
   if (info) {
     videoFps = info.fps || 30;
-    els.playerInfo.textContent = `${info.width}×${info.height} @ ${videoFps} fps`;
+    els.playerInfo.textContent = `${baseName(path)} · ${info.width}×${info.height} @ ${videoFps} fps`;
   } else {
-    els.playerInfo.textContent = "";
+    els.playerInfo.textContent = baseName(path);
   }
   refreshResolutionOptions();
   saveState();
+}
+
+// ---- File browser modal --------------------------------------------
+function openBrowse() {
+  els.browseModal.classList.remove("hidden");
+  els.browseModal.setAttribute("aria-hidden", "false");
+  // Open at: current video's folder > last browsed dir > drive root.
+  // Only use currentVideo if it's an absolute path (legacy bare names aren't).
+  const isAbs = currentVideo && /[\\/]/.test(currentVideo);
+  const start = (isAbs ? currentVideo : "") || lastBrowseDir || "";
+  loadBrowse(start);
+}
+
+function closeBrowse() {
+  els.browseModal.classList.add("hidden");
+  els.browseModal.setAttribute("aria-hidden", "true");
+}
+
+async function loadBrowse(path) {
+  els.browseStatus.textContent = "Đang tải…";
+  els.browseList.innerHTML = "";
+  try {
+    const res = await fetch(`/api/browse?path=${encodeURIComponent(path || "")}`);
+    if (!res.ok) {
+      const t = await res.text();
+      throw new Error(t || `HTTP ${res.status}`);
+    }
+    const data = await res.json();
+    renderBrowse(data);
+  } catch (e) {
+    els.browseStatus.textContent = "";
+    els.browseList.innerHTML = `<div class="browse-empty">Không mở được thư mục:<br>${(e.message || e).toString().slice(0, 200)}</div>`;
+  }
+}
+
+function renderBrowse(data) {
+  els.browsePath.value = data.path || "";
+  els.browseStatus.textContent = data.path || "Ổ đĩa / gốc";
+  // Remember the folder (not a drive-root listing) for next time.
+  if (data.path) { lastBrowseDir = data.path; saveState(); }
+
+  // Shortcuts (chips)
+  els.browseShortcuts.innerHTML = "";
+  for (const sc of (data.shortcuts || [])) {
+    const chip = document.createElement("span");
+    chip.className = "browse-chip";
+    chip.textContent = sc.name;
+    chip.title = sc.path;
+    chip.addEventListener("click", () => loadBrowse(sc.path));
+    els.browseShortcuts.appendChild(chip);
+  }
+
+  // Up button -> parent ("" means jump to drive/root list)
+  els.browseUp.disabled = data.parent === null;
+  els.browseUp.onclick = data.parent === null ? null : () => loadBrowse(data.parent);
+
+  // Entries
+  els.browseList.innerHTML = "";
+  const entries = data.entries || [];
+  if (!entries.length) {
+    els.browseList.innerHTML = `<div class="browse-empty">Thư mục trống (không có video hoặc thư mục con).</div>`;
+    return;
+  }
+  for (const e of entries) {
+    const row = document.createElement("div");
+    row.className = "browse-row" + (e.is_dir ? "" : " is-file");
+    const size = e.is_dir ? "" : `<span class="b-size">${e.size_mb} MB</span>`;
+    row.innerHTML = `
+      <span class="b-icon">${e.is_dir ? "📁" : "🎬"}</span>
+      <span class="b-name" title="${e.path.replace(/"/g, "&quot;")}">${e.name}</span>
+      ${size}`;
+    row.addEventListener("click", () => {
+      if (e.is_dir) loadBrowse(e.path);
+      else pickVideo(e.path);
+    });
+    els.browseList.appendChild(row);
+  }
+}
+
+function pickVideo(path) {
+  closeBrowse();
+  selectVideo(path);
 }
 
 // The canvas source = first clip's video (run_job uses clip[0] for the canvas),
@@ -588,7 +676,6 @@ function previewClip(clip) {
     };
     els.player.addEventListener("loadeddata", onReady);
     selectVideo(clip.video);
-    if (els.videoSelect) els.videoSelect.value = clip.video;
     return;
   }
   _playClipRange(clip);
@@ -677,13 +764,9 @@ function applyProjectPayload(p) {
   // Load the first source into the player so capture/preview has a context.
   const firstSource = (clips[0] && clips[0].video) || p.video || "";
   if (firstSource) {
-    const opt = [...els.videoSelect.options].find(o => o.value === firstSource);
-    if (opt) {
-      els.videoSelect.value = firstSource;
-      selectVideo(firstSource);
-    } else {
-      flashTopMessage(`Video "${firstSource}" không có trong workspace/raw`);
-    }
+    selectVideo(firstSource);  // resolves bare names (legacy) or absolute paths
+  } else {
+    updatePickLabel();
   }
   saveState();
 }
@@ -939,9 +1022,18 @@ async function cancelRender() {
 }
 
 // ---- Wire up --------------------------------------------------------
-// Auto-refresh the source list each time the dropdown is opened (no manual button).
-els.videoSelect.addEventListener("mousedown", () => loadVideos(false, true));
-els.videoSelect.addEventListener("change", (e) => selectVideo(e.target.value));
+// Source picker: open the filesystem browser modal.
+els.pickVideoBtn.addEventListener("click", openBrowse);
+els.browseClose.addEventListener("click", closeBrowse);
+els.browseBackdrop.addEventListener("click", closeBrowse);
+els.browseGo.addEventListener("click", () => loadBrowse(els.browsePath.value.trim()));
+els.browsePath.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") { e.preventDefault(); loadBrowse(els.browsePath.value.trim()); }
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !els.browseModal.classList.contains("hidden")) closeBrowse();
+});
+
 els.slowSlider.addEventListener("input", updateSlowLabel);
 els.resolutionSelect.addEventListener("change", (e) => {
   outHeight = parseInt(e.target.value, 10) || 0;
@@ -1034,7 +1126,10 @@ document.addEventListener("keydown", (e) => {
   updateSlowLabel();
   renderClipsTable();
   updatePlayBtn();
-  await Promise.all([loadVideos(true), loadProjectList()]);
+  updatePickLabel();
+  // Restore the last-used source video into the player, if any.
+  if (currentVideo) selectVideo(currentVideo);
+  await loadProjectList();
   refreshResolutionOptions();
   refreshRenderSummary();
 })();

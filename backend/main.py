@@ -102,6 +102,32 @@ def _safe_raw_path(filename: str) -> Path:
     return p
 
 
+def _safe_source_path(raw: str) -> Path:
+    """Resolve a source video by absolute path anywhere on the local machine.
+
+    The app is local-only (bound to 127.0.0.1, single operator), so sources are
+    no longer confined to workspace/raw — the user browses their own disks and
+    we process files in place. A bare filename (no separator) is treated as a
+    legacy workspace/raw entry for backward compatibility with old projects.
+    Only existing files with a known video extension are accepted.
+    """
+    raw = (raw or "").strip().strip('"')
+    if not raw:
+        raise HTTPException(400, "Thiếu đường dẫn video nguồn")
+    p = Path(raw)
+    if not p.is_absolute() and len(p.parts) == 1:
+        p = RAW_DIR / raw  # legacy: bare name under workspace/raw
+    try:
+        p = p.resolve()
+    except Exception:
+        raise HTTPException(400, "Đường dẫn không hợp lệ")
+    if not p.is_file():
+        raise HTTPException(404, "File không tồn tại")
+    if p.suffix.lower() not in VIDEO_EXTS:
+        raise HTTPException(400, "Không phải file video")
+    return p
+
+
 def _safe_output_path(filename: str) -> Path:
     p = (OUT_DIR / filename).resolve()
     if OUT_DIR.resolve() not in p.parents and p != OUT_DIR.resolve():
@@ -171,6 +197,90 @@ def _stream_file(path: Path, request: Request) -> Response:
 async def stream(filename: str, request: Request):
     path = _safe_raw_path(filename)
     return _stream_file(path, request)
+
+
+@app.get("/api/source-stream")
+async def source_stream(path: str, request: Request):
+    """Byte-range stream any source video by absolute path (local-only)."""
+    return _stream_file(_safe_source_path(path), request)
+
+
+@app.get("/api/source-probe")
+async def source_probe(path: str) -> JSONResponse:
+    """Probe any source video by absolute path."""
+    return JSONResponse(render.probe_video(_safe_source_path(path)))
+
+
+# --------------------------------------------------------------------------
+# Filesystem browser — lets the user pick a source video from any drive/folder
+# instead of copying it into workspace/raw. Local-only convenience.
+# --------------------------------------------------------------------------
+def _browse_shortcuts() -> List[dict]:
+    sc: List[dict] = [{"name": "📁 workspace/raw", "path": str(RAW_DIR.resolve())}]
+    home = Path.home()
+    sc.append({"name": "🏠 Home", "path": str(home)})
+    for sub in ("Videos", "Downloads", "Desktop"):
+        d = home / sub
+        if d.is_dir():
+            sc.append({"name": f"📂 {sub}", "path": str(d)})
+    return sc
+
+
+def _browse_root() -> dict:
+    """List drive roots (Windows) or '/' (POSIX)."""
+    entries: List[dict] = []
+    if os.name == "nt":
+        import string
+        for letter in string.ascii_uppercase:
+            drive = f"{letter}:\\"
+            if Path(drive).exists():
+                entries.append({"name": drive, "path": drive, "is_dir": True})
+    else:
+        entries.append({"name": "/", "path": "/", "is_dir": True})
+    return {"path": "", "parent": None, "is_root": True,
+            "entries": entries, "shortcuts": _browse_shortcuts()}
+
+
+@app.get("/api/browse")
+async def browse(path: str = "") -> JSONResponse:
+    path = (path or "").strip().strip('"')
+    if not path:
+        return JSONResponse(_browse_root())
+
+    p = Path(path)
+    try:
+        p = p.resolve()
+    except Exception:
+        raise HTTPException(400, "Đường dẫn không hợp lệ")
+    if p.is_file():
+        p = p.parent  # given a file -> browse its folder
+    if not p.is_dir():
+        raise HTTPException(404, "Thư mục không tồn tại")
+
+    dirs: List[dict] = []
+    files: List[dict] = []
+    try:
+        children = sorted(p.iterdir(), key=lambda x: x.name.lower())
+    except PermissionError:
+        raise HTTPException(403, "Không có quyền truy cập thư mục này")
+    for child in children:
+        try:
+            if child.is_dir():
+                dirs.append({"name": child.name, "path": str(child), "is_dir": True})
+            elif child.is_file() and child.suffix.lower() in VIDEO_EXTS:
+                files.append({
+                    "name": child.name, "path": str(child), "is_dir": False,
+                    "size_mb": round(child.stat().st_size / (1024 * 1024), 1),
+                })
+        except (PermissionError, OSError):
+            continue
+
+    # "" means jump back to the drive/root list; reached at a drive root.
+    parent = "" if p.parent == p else str(p.parent)
+    return JSONResponse({
+        "path": str(p), "parent": parent, "is_root": False,
+        "entries": dirs + files, "shortcuts": _browse_shortcuts(),
+    })
 
 
 @app.get("/api/output/{filename}")
@@ -341,7 +451,7 @@ async def export_clip(req: ExportClipRequest) -> JSONResponse:
     """
     if req.end <= req.start:
         raise HTTPException(400, "Invalid clip range")
-    video_path = _safe_raw_path(req.video)
+    video_path = _safe_source_path(req.video)
 
     clip = render.Clip(start=req.start, end=req.end, slowmo=req.include_slowmo,
                        video_path=video_path)
@@ -386,7 +496,7 @@ async def start_render(req: RenderRequest) -> JSONResponse:
         if not name:
             raise HTTPException(400, "Clip thiếu video nguồn")
         if name not in resolved:
-            resolved[name] = _safe_raw_path(name)
+            resolved[name] = _safe_source_path(name)
         return resolved[name]
 
     # Validate clip ranges + sources
