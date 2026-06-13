@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="vi">
+<html lang="en">
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -32,42 +32,48 @@
 
     <!-- Project save/load -->
     <div class="project-bar">
-      <input id="projectName" type="text" placeholder="Tên project" autocomplete="off" />
+      <input id="projectName" type="text" placeholder="Project name" autocomplete="off" />
       <button id="saveProjectBtn" type="button" class="btn small primary" title="Save (Ctrl+S)">Save</button>
     </div>
     <div class="project-bar">
-      <select id="projectSelect" title="Chọn project đã lưu">
-        <option value="">— Load project đã lưu —</option>
+      <select id="projectSelect" title="Load a saved project">
+        <option value="">— Load saved project —</option>
       </select>
       <button id="loadProjectBtn" type="button" class="btn small" disabled>Load</button>
-      <button id="deleteProjectBtn" type="button" class="btn small danger ghost" title="Xoá project" disabled>✕</button>
+      <button id="deleteProjectBtn" type="button" class="btn small danger ghost" title="Delete project" disabled>✕</button>
     </div>
 
     <hr class="sep" />
 
     <div class="grid">
-      <label>Giải đấu
-        <input id="tournament" type="text" placeholder="VD: VL TOUR 2026" />
+      <label>Tournament
+        <input id="tournament" type="text" placeholder="e.g. VL TOUR 2026" />
       </label>
-      <label>VĐV 1
+      <label>Player 1
         <input id="player1" type="text" placeholder="Player 1" />
       </label>
-      <label>VĐV 2
+      <label>Player 2
         <input id="player2" type="text" placeholder="Player 2" />
       </label>
-      <label>Intro (giây)
+      <label>Intro (seconds)
         <input id="introSeconds" type="number" min="0" max="15" step="0.5" value="4" />
       </label>
-      <label>Video nguồn (đang xem)
-        <button id="pickVideoBtn" type="button" class="btn pick-video" title="Chọn video từ ổ đĩa/thư mục bất kỳ">
+      <label>Source video (now viewing)
+        <button id="pickVideoBtn" type="button" class="btn pick-video" title="Pick a video from any drive/folder">
           <span class="pick-icon">📂</span>
-          <span id="pickVideoLabel" class="pick-label">Chọn video nguồn…</span>
+          <span id="pickVideoLabel" class="pick-label">Choose source video…</span>
         </button>
-        <small class="hint">Chọn từ bất kỳ ổ đĩa/thư mục nào — xử lý trực tiếp, không cần copy vào workspace. Đổi video để thêm pha từ nhiều nguồn.</small>
+        <small class="hint">Pick from any drive/folder — processed in place, no copy into workspace. Switch videos to add events from multiple sources.</small>
       </label>
       <label>Slow-motion: <span id="slowLabel">50%</span>
         <input id="slowSlider" type="range" min="10" max="100" step="5" value="50" />
-        <small class="hint" id="slowHint">Phát ở 50% tốc độ thực (chậm 2×)</small>
+        <small class="hint" id="slowHint">Plays at 50% of real speed (2× slower)</small>
+      </label>
+      <label class="res-row">Output resolution
+        <select id="resolutionSelect" title="Choose output resolution — max = source video resolution">
+          <option value="0">Auto</option>
+        </select>
+        <small class="hint" id="resHint">Applies to all exports (full render + per-event Export / Export + Replay). Capped at the source resolution, never upscaled.</small>
       </label>
     </div>
   </section>
@@ -78,7 +84,7 @@
 
     <div class="player-wrap">
       <video id="player" preload="metadata" playsinline></video>
-      <div class="overlay" id="overlayMsg">Chọn video ở mục Setup để bắt đầu</div>
+      <div class="overlay" id="overlayMsg">Pick a source video in Setup to begin</div>
     </div>
 
     <!-- Custom timeline scrubber -->
@@ -94,22 +100,22 @@
     <!-- Custom control bar -->
     <div class="player-controls">
       <div class="ctrl-left">
-        <button class="ctrl-btn" data-skip="-10" title="Lùi 10s (Shift+←)">-10s</button>
-        <button class="ctrl-btn" data-skip="-5" title="Lùi 5s (←)">-5s</button>
+        <button class="ctrl-btn" data-skip="-10" title="Back 10s (Shift+←)">-10s</button>
+        <button class="ctrl-btn" data-skip="-5" title="Back 5s (←)">-5s</button>
         <button class="ctrl-btn play" id="playBtn" title="Play/Pause (Space)">
           <span class="play-icon" id="playIcon">▶</span>
           <span class="play-text" id="playText">Play</span>
         </button>
-        <button class="ctrl-btn" data-skip="5" title="Tới 5s (→)">+5s</button>
-        <button class="ctrl-btn" data-skip="10" title="Tới 10s (Shift+→)">+10s</button>
-        <button class="ctrl-btn" data-skip="20" title="Tới 20s">+20s</button>
+        <button class="ctrl-btn" data-skip="5" title="Forward 5s (→)">+5s</button>
+        <button class="ctrl-btn" data-skip="10" title="Forward 10s (Shift+→)">+10s</button>
+        <button class="ctrl-btn" data-skip="20" title="Forward 20s">+20s</button>
       </div>
 
       <div class="ctrl-right">
         <span class="ctrl-time" id="playerTime">00:00.00 / 00:00.00</span>
         <label class="ctrl-speed">
           <span class="muted">speed</span>
-          <select id="speedSelect" title="Tốc độ phát preview">
+          <select id="speedSelect" title="Preview playback speed">
             <option value="0.25">0.25x</option>
             <option value="0.5">0.5x</option>
             <option value="0.75">0.75x</option>
@@ -119,7 +125,7 @@
             <option value="2">2x</option>
           </select>
         </label>
-        <button class="ctrl-btn highlight" id="highlightBtn" title="Đánh dấu pha bóng (I/O)">
+        <button class="ctrl-btn highlight" id="highlightBtn" title="Mark a highlight event (I/O)">
           <span class="hl-dot"></span>
           <span id="highlightText">Highlight start/end</span>
         </button>
@@ -127,7 +133,7 @@
     </div>
 
     <div class="player-meta">
-      <span class="muted" id="playerInfo">Chưa chọn video</span>
+      <span class="muted" id="playerInfo">No video selected</span>
       <span class="muted" id="captureStatus"></span>
     </div>
   </section>
@@ -137,7 +143,8 @@
     <div class="clips-header">
       <h2>3 · Highlight Events (<span id="clipCount">0</span>)</h2>
       <div class="row">
-        <button id="clearClips" class="btn ghost">Xoá tất cả</button>
+        <button id="undoClipBtn" class="btn ghost" title="Undo (Ctrl+Z)" disabled>↩ Undo</button>
+        <button id="clearClips" class="btn ghost">Clear all</button>
       </div>
     </div>
 
@@ -154,9 +161,9 @@
         </colgroup>
         <thead>
           <tr>
-            <th title="Có slow-motion (uncheck = chỉ render real-speed)">SLO</th>
+            <th title="Slow-motion (uncheck = real-speed only)">SLO</th>
             <th>#</th>
-            <th title="Video nguồn của pha">Nguồn</th>
+            <th title="Source video of this event">Src</th>
             <th>Start</th>
             <th>End</th>
             <th>Dur</th>
@@ -164,7 +171,7 @@
           </tr>
         </thead>
         <tbody id="clipsBody">
-          <tr class="empty"><td colspan="7">Chưa có pha nào.</td></tr>
+          <tr class="empty"><td colspan="7">No events yet.</td></tr>
         </tbody>
       </table>
     </div>
@@ -172,28 +179,21 @@
 
   <!-- D. RENDER -------------------------------------------------------- -->
   <section class="card render-card">
-    <h2>4 · Xuất Video</h2>
-    <div class="render-summary" id="renderSummary">Sẵn sàng — thêm pha bóng để bật xuất video.</div>
-
-    <label class="res-row">Độ phân giải xuất
-      <select id="resolutionSelect" title="Chọn độ phân giải output — tối đa = độ phân giải video nguồn">
-        <option value="0">Auto</option>
-      </select>
-      <small class="hint" id="resHint">Tối đa bằng độ phân giải video nguồn (không phóng to).</small>
-    </label>
+    <h2>4 · Export Video</h2>
+    <div class="render-summary" id="renderSummary">Ready — add highlight events to enable export.</div>
 
     <button id="renderBtn" class="btn render" disabled>
       <svg class="render-icon" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
         <polygon points="5 3 19 12 5 21 5 3"></polygon>
       </svg>
-      <span>Xuất video highlight</span>
+      <span>Export highlight video</span>
     </button>
 
     <div id="progressBox" class="progress hidden">
       <div class="progress-meta">
         <span class="progress-stage-wrap">
           <span class="progress-spinner"></span>
-          <span id="progressStage">Đang khởi tạo…</span>
+          <span id="progressStage">Initializing…</span>
         </span>
         <span id="progressPct">0%</span>
       </div>
@@ -202,18 +202,18 @@
         <div class="progress-shimmer"></div>
       </div>
       <div class="progress-msg muted" id="progressMsg"></div>
-      <div class="row"><button id="cancelBtn" class="btn ghost">Huỷ</button></div>
+      <div class="row"><button id="cancelBtn" class="btn ghost">Cancel</button></div>
     </div>
 
     <div id="resultBox" class="result hidden">
-      <h3><span class="check">✓</span> Hoàn tất</h3>
+      <h3><span class="check">✓</span> Done</h3>
       <div class="result-info">
         <span class="muted">File:</span>
         <code id="resultFilename">—</code>
       </div>
       <div class="row">
-        <button id="openFolderBtn" type="button" class="btn primary">📁 Mở folder output</button>
-        <button id="newRenderBtn" type="button" class="btn ghost">Render mới</button>
+        <button id="openFolderBtn" type="button" class="btn primary">📁 Open output folder</button>
+        <button id="newRenderBtn" type="button" class="btn ghost">New render</button>
       </div>
     </div>
   </section>
@@ -223,17 +223,17 @@
 <!-- File browser modal: pick a source video from any drive/folder ------- -->
 <div id="browseModal" class="modal hidden" aria-hidden="true">
   <div class="modal-backdrop" id="browseBackdrop"></div>
-  <div class="modal-box" role="dialog" aria-label="Chọn video nguồn">
+  <div class="modal-box" role="dialog" aria-label="Choose source video">
     <div class="modal-head">
-      <h3>📂 Chọn video nguồn</h3>
-      <button id="browseClose" type="button" class="modal-close" title="Đóng (Esc)">✕</button>
+      <h3>📂 Choose source video</h3>
+      <button id="browseClose" type="button" class="modal-close" title="Close (Esc)">✕</button>
     </div>
 
     <div class="browse-bar">
-      <button id="browseUp" type="button" class="btn small" title="Lên thư mục cha">↑</button>
+      <button id="browseUp" type="button" class="btn small" title="Parent folder">↑</button>
       <input id="browsePath" type="text" spellcheck="false" autocomplete="off"
-             placeholder="Dán đường dẫn… (VD: D:\Videos\match.mp4)" />
-      <button id="browseGo" type="button" class="btn small primary">Đi</button>
+             placeholder="Paste a path… (e.g. D:\Videos\match.mp4)" />
+      <button id="browseGo" type="button" class="btn small primary">Go</button>
     </div>
 
     <div class="browse-shortcuts" id="browseShortcuts"></div>

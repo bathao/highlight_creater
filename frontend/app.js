@@ -37,6 +37,7 @@ const els = {
   clipsBody: $("clipsBody"),
   clipCount: $("clipCount"),
   clearClips: $("clearClips"),
+  undoClipBtn: $("undoClipBtn"),
 
   // Project save/load
   projectName: $("projectName"),
@@ -81,6 +82,7 @@ let videoFps = 30;
 let currentJobId = null;
 let currentEventSource = null;
 let nextClipId = 1;
+let clipUndoStack = []; // snapshots of `clips` taken before destructive edits
 let outHeight = 0;        // target output height (px); 0 = native source height
 let lastBrowseDir = "";  // last folder opened in the file browser (persisted)
 const probeCache = {};   // video path -> probe info {width,height,fps,...}
@@ -201,8 +203,8 @@ async function probeVideo(path) {
 // Update the picker button to show the current source filename (full path on hover).
 function updatePickLabel() {
   if (!els.pickVideoLabel) return;
-  els.pickVideoLabel.textContent = currentVideo ? baseName(currentVideo) : "Chọn video nguồn…";
-  els.pickVideoBtn.title = currentVideo || "Chọn video từ ổ đĩa/thư mục bất kỳ";
+  els.pickVideoLabel.textContent = currentVideo ? baseName(currentVideo) : "Choose source video…";
+  els.pickVideoBtn.title = currentVideo || "Pick a video from any drive/folder";
 }
 
 async function selectVideo(path) {
@@ -211,7 +213,7 @@ async function selectVideo(path) {
     els.player.removeAttribute("src");
     els.player.load();
     els.overlay.classList.remove("hidden");
-    els.playerInfo.textContent = "Chưa chọn video";
+    els.playerInfo.textContent = "No video selected";
     updatePickLabel();
     refreshResolutionOptions();
     return;
@@ -251,7 +253,7 @@ async function openBrowse() {
     : (lastBrowseDir || "");
   const prevLabel = els.pickVideoLabel.textContent;
   els.pickVideoBtn.disabled = true;
-  els.pickVideoLabel.textContent = "Đang mở hộp thoại chọn file…";
+  els.pickVideoLabel.textContent = "Opening file dialog…";
   try {
     const res = await fetch("/api/pick-file", {
       method: "POST",
@@ -289,7 +291,7 @@ function closeBrowse() {
 }
 
 async function loadBrowse(path) {
-  els.browseStatus.textContent = "Đang tải…";
+  els.browseStatus.textContent = "Loading…";
   els.browseList.innerHTML = "";
   try {
     const res = await fetch(`/api/browse?path=${encodeURIComponent(path || "")}`);
@@ -301,13 +303,13 @@ async function loadBrowse(path) {
     renderBrowse(data);
   } catch (e) {
     els.browseStatus.textContent = "";
-    els.browseList.innerHTML = `<div class="browse-empty">Không mở được thư mục:<br>${(e.message || e).toString().slice(0, 200)}</div>`;
+    els.browseList.innerHTML = `<div class="browse-empty">Cannot open folder:<br>${(e.message || e).toString().slice(0, 200)}</div>`;
   }
 }
 
 function renderBrowse(data) {
   els.browsePath.value = data.path || "";
-  els.browseStatus.textContent = data.path || "Ổ đĩa / gốc";
+  els.browseStatus.textContent = data.path || "Drives / root";
   // Remember the folder (not a drive-root listing) for next time.
   if (data.path) { lastBrowseDir = data.path; saveState(); }
 
@@ -330,7 +332,7 @@ function renderBrowse(data) {
   els.browseList.innerHTML = "";
   const entries = data.entries || [];
   if (!entries.length) {
-    els.browseList.innerHTML = `<div class="browse-empty">Thư mục trống (không có video hoặc thư mục con).</div>`;
+    els.browseList.innerHTML = `<div class="browse-empty">Empty folder (no videos or subfolders).</div>`;
     return;
   }
   for (const e of entries) {
@@ -362,7 +364,7 @@ function canvasSourceVideo() {
 
 // Short label for a target height, used in the render summary.
 function resShortLabel(h) {
-  if (!h) return "gốc";
+  if (!h) return "source";
   if (h <= 720) return "720p";
   if (h <= 1080) return "1K";
   return "2K";
@@ -376,7 +378,7 @@ async function refreshResolutionOptions() {
   if (!sel) return;
   const src = canvasSourceVideo();
   if (!src) {
-    sel.innerHTML = `<option value="0">Auto — chọn video nguồn</option>`;
+    sel.innerHTML = `<option value="0">Auto — pick a source video</option>`;
     sel.value = "0";
     sel.disabled = true;
     return;
@@ -392,7 +394,7 @@ async function refreshResolutionOptions() {
     // Source smaller than 720p: single native option, no downscale possible.
     const o = document.createElement("option");
     o.value = "0";
-    o.textContent = srcH ? `Auto · gốc ${srcH}p` : "Auto · gốc";
+    o.textContent = srcH ? `Auto · source ${srcH}p` : "Auto · source";
     sel.appendChild(o);
     sel.value = "0";
     sel.disabled = true;
@@ -406,7 +408,7 @@ async function refreshResolutionOptions() {
   for (const t of avail) {
     const o = document.createElement("option");
     o.value = String(t.h);
-    o.textContent = t.h >= srcH ? `${t.label} · gốc` : t.label;
+    o.textContent = t.h >= srcH ? `${t.label} · source` : t.label;
     sel.appendChild(o);
   }
   // Keep the previous choice if still valid; otherwise default to the highest
@@ -527,7 +529,7 @@ function updateSlowLabel() {
   const v = parseInt(els.slowSlider.value, 10);
   els.slowLabel.textContent = `${v}%`;
   const factor = 100 / v;
-  els.slowHint.textContent = `Phát ở ${v}% tốc độ thực (chậm ${factor.toFixed(2)}×)`;
+  els.slowHint.textContent = `Plays at ${v}% of real speed (${factor.toFixed(2)}× slower)`;
   saveState();
   refreshRenderSummary();
 }
@@ -538,7 +540,7 @@ function setCaptureState(active, t = null) {
     captureStart = t;
     els.highlightBtn.classList.add("recording");
     els.highlightText.textContent = `End highlight @ ${fmt(t)}`;
-    els.captureStatus.textContent = `● Đang bắt — start @ ${fmt(t)}`;
+    els.captureStatus.textContent = `● Capturing — start @ ${fmt(t)}`;
   } else {
     captureStart = null;
     els.highlightBtn.classList.remove("recording");
@@ -548,7 +550,7 @@ function setCaptureState(active, t = null) {
 }
 
 function markIn() {
-  if (!currentVideo) { flashMsg("Hãy chọn video trước"); return; }
+  if (!currentVideo) { flashMsg("Pick a source video first"); return; }
   setCaptureState(true, els.player.currentTime || 0);
 }
 
@@ -556,7 +558,7 @@ function markOut() {
   if (captureStart === null) return;
   const end = els.player.currentTime || 0;
   if (end <= captureStart + 0.05) {
-    flashMsg("Thời điểm kết thúc phải sau thời điểm bắt đầu");
+    flashMsg("End time must be after start time");
     return;
   }
   addClip(captureStart, end);
@@ -576,8 +578,30 @@ function flashMsg(msg) {
 }
 
 // ---- Clips list -----------------------------------------------------
+// ---- Undo (restore accidentally deleted / changed events) -----------
+// Snapshot `clips` before each structural change so the Undo button (and
+// Ctrl+Z) can step back one action at a time.
+function pushClipUndo() {
+  clipUndoStack.push(JSON.parse(JSON.stringify(clips)));
+  if (clipUndoStack.length > 50) clipUndoStack.shift();
+  updateUndoBtn();
+}
+function updateUndoBtn() {
+  if (els.undoClipBtn) els.undoClipBtn.disabled = clipUndoStack.length === 0;
+}
+function undoClips() {
+  if (!clipUndoStack.length) return;
+  clips = clipUndoStack.pop();
+  renderClipsTable();
+  refreshResolutionOptions();
+  saveState();
+  updateUndoBtn();
+  flashMsg("Undone");
+}
+
 function addClip(start, end) {
-  if (!currentVideo) { flashTopMessage("Chọn video nguồn trước khi đánh dấu pha"); return; }
+  if (!currentVideo) { flashTopMessage("Pick a source video before marking an event"); return; }
+  pushClipUndo();
   // New highlight events default to no slow-motion (SLO unchecked).
   clips.push({ id: nextClipId++, start, end, slowmo: false, video: currentVideo });
   renderClipsTable();
@@ -601,6 +625,7 @@ function sourceBadge(video) {
 }
 
 function removeClip(id) {
+  pushClipUndo();
   clips = clips.filter(c => c.id !== id);
   renderClipsTable();
   refreshResolutionOptions();
@@ -612,6 +637,7 @@ function moveClip(id, dir) {
   if (i < 0) return;
   const j = i + dir;
   if (j < 0 || j >= clips.length) return;
+  pushClipUndo();
   [clips[i], clips[j]] = [clips[j], clips[i]];
   renderClipsTable();
   refreshResolutionOptions();  // reorder may change clip[0] = the canvas source
@@ -621,7 +647,7 @@ function moveClip(id, dir) {
 function renderClipsTable() {
   els.clipCount.textContent = clips.length;
   if (!clips.length) {
-    els.clipsBody.innerHTML = `<tr class="empty"><td colspan="7">Chưa có pha nào. Bấm <b>Highlight start/end</b> để đánh dấu.</td></tr>`;
+    els.clipsBody.innerHTML = `<tr class="empty"><td colspan="7">No events yet. Click <b>Highlight start/end</b> to mark one.</td></tr>`;
     refreshRenderSummary();
     return;
   }
@@ -633,7 +659,7 @@ function renderClipsTable() {
     tr.innerHTML = `
       <td class="cell-check">
         <input type="checkbox" data-id="${c.id}" data-field="slowmo" ${checked}
-               title="Có slow-motion cho pha này (uncheck = chỉ render real-speed)" />
+               title="Slow-motion for this event (uncheck = real-speed only)" />
       </td>
       <td>${idx + 1}</td>
       <td class="src"><span class="src-badge" title="${srcVideo.replace(/"/g, "&quot;")}">${sourceBadge(srcVideo)}</span></td>
@@ -641,15 +667,15 @@ function renderClipsTable() {
       <td><input class="t-input" data-id="${c.id}" data-field="end" value="${fmt(c.end)}" /></td>
       <td class="dur">${(c.end - c.start).toFixed(1)}s</td>
       <td class="actions">
-        <button data-act="preview" data-id="${c.id}" title="Preview pha bóng">▶</button>
-        <button data-act="up" data-id="${c.id}" title="Lên">↑</button>
-        <button data-act="down" data-id="${c.id}" title="Xuống">↓</button>
-        <button data-act="del" data-id="${c.id}" class="del" title="Xoá">✕</button>
+        <button data-act="preview" data-id="${c.id}" title="Preview event">▶</button>
+        <button data-act="up" data-id="${c.id}" title="Move up">↑</button>
+        <button data-act="down" data-id="${c.id}" title="Move down">↓</button>
+        <button data-act="del" data-id="${c.id}" class="del" title="Delete">✕</button>
         <span class="actions-sep"></span>
         <button data-act="export" data-id="${c.id}" class="btn-exp real"
-                title="Xuất raw pha này (file riêng, chỉ tốc độ thực)">Export</button>
+                title="Export this event (separate file, real-speed only)">Export</button>
         <button data-act="exportSlow" data-id="${c.id}" class="btn-exp slow"
-                title="Xuất raw + slow-motion replay (badge SLOW MOTION ở góc trên phải)">Export + Replay</button>
+                title="Export real-speed + slow-motion replay (SLOW MOTION badge, top-right)">Export + Replay</button>
       </td>
     `;
     els.clipsBody.appendChild(tr);
@@ -696,6 +722,8 @@ els.clipsBody.addEventListener("change", (e) => {
     input.value = fmt(clip[field]);
     return;
   }
+  if (v === clip[field]) return;  // no change -> no undo entry
+  pushClipUndo();
   clip[field] = v;
   if (clip.end <= clip.start) clip.end = clip.start + 0.5;
   renderClipsTable();
@@ -753,13 +781,13 @@ function refreshRenderSummary() {
 
   if (!clips.length) {
     els.renderSummary.innerHTML = currentVideo
-      ? `Sẵn sàng — thêm pha bóng để bật xuất video.`
-      : `Chọn video nguồn để bắt đầu.`;
+      ? `Ready — add highlight events to enable export.`
+      : `Pick a source video to begin.`;
     return;
   }
-  const srcLabel = sources.length > 1 ? ` • <b>${sources.length}</b> video nguồn` : "";
+  const srcLabel = sources.length > 1 ? ` • <b>${sources.length}</b> source videos` : "";
   els.renderSummary.innerHTML = `
-    <b>${clips.length}</b> pha (<b>${slowCount}</b> có slow-mo ${slow}%, ${factor.toFixed(2)}×)${srcLabel} •
+    <b>${clips.length}</b> events (<b>${slowCount}</b> with slow-mo ${slow}%, ${factor.toFixed(2)}×)${srcLabel} •
     intro <b>${intro}s</b> →
     real <b>${fmtClock(totalReal)}</b> + slow-mo <b>${fmtClock(totalSlow)}</b> =
     output ≈ <b>${fmtClock(totalOut)}</b> @ <b>${resShortLabel(outHeight)}</b>
@@ -797,6 +825,9 @@ function applyProjectPayload(p) {
     // Migration: old projects stored clips without `video` (single-source) -> backfill.
     video: c.video || p.video || "",
   }));
+  // Loading a project is a fresh context — drop undo history from the old one.
+  clipUndoStack = [];
+  updateUndoBtn();
   renderClipsTable();
   refreshResolutionOptions();
   // Load the first source into the player so capture/preview has a context.
@@ -814,7 +845,7 @@ async function loadProjectList() {
     const res = await fetch("/api/projects");
     const data = await res.json();
     const cur = els.projectSelect.value;
-    els.projectSelect.innerHTML = '<option value="">— Load project đã lưu —</option>';
+    els.projectSelect.innerHTML = '<option value="">— Load saved project —</option>';
     for (const p of data.projects) {
       const o = document.createElement("option");
       o.value = p.name;
@@ -835,17 +866,17 @@ function updateProjectButtons() {
 async function saveProject() {
   const name = (els.projectName.value || "").trim();
   if (!name) {
-    flashTopMessage("Nhập tên project trước khi save");
+    flashTopMessage("Enter a project name before saving");
     els.projectName.focus();
     return;
   }
   if (!/^[A-Za-z0-9 _\-\.]{1,80}$/.test(name)) {
-    flashTopMessage("Tên project chỉ dùng chữ/số/space/_-. (max 80)");
+    flashTopMessage("Project name: letters/numbers/space/_-. only (max 80)");
     return;
   }
   // Confirm overwrite if exists
   const existing = [...els.projectSelect.options].some(o => o.value === name);
-  if (existing && !confirm(`Project "${name}" đã tồn tại. Ghi đè?`)) return;
+  if (existing && !confirm(`Project "${name}" already exists. Overwrite?`)) return;
 
   try {
     const res = await fetch("/api/projects", {
@@ -857,19 +888,19 @@ async function saveProject() {
       const t = await res.text();
       throw new Error(t);
     }
-    flashTopMessage(`✓ Đã lưu "${name}"`);
+    flashTopMessage(`✓ Saved "${name}"`);
     await loadProjectList();
     els.projectSelect.value = name;
     updateProjectButtons();
   } catch (e) {
-    flashTopMessage(`Lỗi save: ${e.message || e}`);
+    flashTopMessage(`Save error: ${e.message || e}`);
   }
 }
 
 async function loadProject() {
   const name = els.projectSelect.value;
   if (!name) return;
-  if (clips.length && !confirm(`Load "${name}" sẽ thay thế ${clips.length} pha hiện tại. Tiếp tục?`)) return;
+  if (clips.length && !confirm(`Loading "${name}" will replace the current ${clips.length} events. Continue?`)) return;
   try {
     const res = await fetch(`/api/projects/${encodeURIComponent(name)}`);
     if (!res.ok) throw new Error(await res.text());
@@ -877,23 +908,23 @@ async function loadProject() {
     clips = []; // reset before applying
     applyProjectPayload(p);
     els.projectName.value = name;
-    flashTopMessage(`✓ Đã load "${name}"`);
+    flashTopMessage(`✓ Loaded "${name}"`);
   } catch (e) {
-    flashTopMessage(`Lỗi load: ${e.message || e}`);
+    flashTopMessage(`Load error: ${e.message || e}`);
   }
 }
 
 async function deleteProject() {
   const name = els.projectSelect.value;
   if (!name) return;
-  if (!confirm(`Xoá project "${name}"?`)) return;
+  if (!confirm(`Delete project "${name}"?`)) return;
   try {
     const res = await fetch(`/api/projects/${encodeURIComponent(name)}`, { method: "DELETE" });
     if (!res.ok) throw new Error(await res.text());
-    flashTopMessage(`✓ Đã xoá "${name}"`);
+    flashTopMessage(`✓ Deleted "${name}"`);
     await loadProjectList();
   } catch (e) {
-    flashTopMessage(`Lỗi xoá: ${e.message || e}`);
+    flashTopMessage(`Delete error: ${e.message || e}`);
   }
 }
 
@@ -911,11 +942,11 @@ function flashTopMessage(msg) {
 async function exportSingleClip(clip, includeSlowmo) {
   const clipVideo = clip.video || currentVideo;
   if (!clipVideo) {
-    alert("Hãy chọn video trước");
+    alert("Pick a source video first");
     return;
   }
   if (!(clip.end > clip.start)) {
-    alert("Clip không hợp lệ");
+    alert("Invalid clip");
     return;
   }
   els.renderBtn.disabled = true;
@@ -962,11 +993,11 @@ async function startRender() {
   // Validate clips
   for (const c of clips) {
     if (!(c.end > c.start)) {
-      alert("Clip không hợp lệ — kiểm tra Start/End.");
+      alert("Invalid clip — check Start/End.");
       return;
     }
     if (!c.video) {
-      alert("Có pha chưa gắn video nguồn — xoá và đánh dấu lại.");
+      alert("An event has no source video — delete it and mark again.");
       return;
     }
   }
@@ -975,7 +1006,7 @@ async function startRender() {
   els.resultBox.classList.add("hidden");
   els.progressFill.style.width = "0%";
   els.progressPct.textContent = "0%";
-  els.progressStage.textContent = "Đang khởi tạo…";
+  els.progressStage.textContent = "Initializing…";
   els.progressMsg.textContent = "";
 
   try {
@@ -1022,7 +1053,7 @@ function listenProgress(jobId) {
         showResult(p.output_file);
       } else if (p.status === "error") {
         es.close(); currentEventSource = null;
-        showRenderError(p.error || p.message || "Lỗi không xác định");
+        showRenderError(p.error || p.message || "Unknown error");
       }
     } catch (e) { /* ignore */ }
   };
@@ -1041,12 +1072,12 @@ async function openOutputFolder() {
     const res = await fetch("/api/open-folder/output", { method: "POST" });
     if (!res.ok) throw new Error(await res.text());
   } catch (e) {
-    alert(`Không mở được folder: ${e.message || e}`);
+    alert(`Cannot open folder: ${e.message || e}`);
   }
 }
 
 function showRenderError(msg) {
-  els.progressStage.textContent = "❌ Lỗi";
+  els.progressStage.textContent = "❌ Error";
   els.progressMsg.textContent = msg;
   els.progressFill.style.background = "linear-gradient(90deg, #d83a3a 0%, #ff7a4a 100%)";
   els.renderBtn.disabled = false;
@@ -1095,9 +1126,12 @@ els.projectName.addEventListener("keydown", (e) => {
 
 els.clearClips.addEventListener("click", () => {
   if (!clips.length) return;
-  if (!confirm("Xoá tất cả các pha?")) return;
+  if (!confirm("Clear all events?")) return;
+  pushClipUndo();
   clips = []; renderClipsTable(); refreshResolutionOptions(); saveState();
 });
+
+els.undoClipBtn.addEventListener("click", undoClips);
 
 els.renderBtn.addEventListener("click", startRender);
 els.cancelBtn.addEventListener("click", cancelRender);
@@ -1165,6 +1199,7 @@ document.addEventListener("keydown", (e) => {
   renderClipsTable();
   updatePlayBtn();
   updatePickLabel();
+  updateUndoBtn();
   // Restore the last-used source video into the player, if any.
   if (currentVideo) selectVideo(currentVideo);
   await loadProjectList();
@@ -1177,5 +1212,15 @@ document.addEventListener("keydown", (e) => {
   if ((e.ctrlKey || e.metaKey) && (e.key === "s" || e.key === "S")) {
     e.preventDefault();
     saveProject();
+  }
+});
+
+// Ctrl+Z to undo the last highlight-event change (skip while typing in inputs)
+document.addEventListener("keydown", (e) => {
+  if ((e.ctrlKey || e.metaKey) && !e.shiftKey && (e.key === "z" || e.key === "Z")) {
+    const tag = (e.target.tagName || "").toLowerCase();
+    if (tag === "input" || tag === "textarea") return;
+    e.preventDefault();
+    undoClips();
   }
 });

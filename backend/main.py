@@ -114,18 +114,18 @@ def _safe_source_path(raw: str) -> Path:
     """
     raw = (raw or "").strip().strip('"')
     if not raw:
-        raise HTTPException(400, "Thiếu đường dẫn video nguồn")
+        raise HTTPException(400, "Missing source video path")
     p = Path(raw)
     if not p.is_absolute() and len(p.parts) == 1:
         p = RAW_DIR / raw  # legacy: bare name under workspace/raw
     try:
         p = p.resolve()
     except Exception:
-        raise HTTPException(400, "Đường dẫn không hợp lệ")
+        raise HTTPException(400, "Invalid path")
     if not p.is_file():
-        raise HTTPException(404, "File không tồn tại")
+        raise HTTPException(404, "File not found")
     if p.suffix.lower() not in VIDEO_EXTS:
-        raise HTTPException(400, "Không phải file video")
+        raise HTTPException(400, "Not a video file")
     return p
 
 
@@ -242,9 +242,9 @@ def _native_pick(initial_dir: str) -> Optional[str]:
         from tkinter import filedialog
         root = tk.Tk(); root.withdraw(); root.attributes("-topmost", True)
         p = filedialog.askopenfilename(
-            title="Chon video nguon",
+            title="Choose source video",
             initialdir=(os.environ.get("HC_PICK_INITDIR") or None),
-            filetypes=[("Video", {exts!r}), ("Tat ca file", "*.*")],
+            filetypes=[("Video", {exts!r}), ("All files", "*.*")],
         )
         root.destroy()
         print(p or "")
@@ -269,9 +269,9 @@ def pick_file(req: PickRequest) -> JSONResponse:
     # wait doesn't stall the async event loop.
     path = _native_pick(req.initial_dir)
     if path is None:
-        raise HTTPException(501, "Hộp thoại hệ thống không khả dụng")
+        raise HTTPException(501, "Native file dialog is unavailable")
     if path and (not Path(path).is_file() or Path(path).suffix.lower() not in VIDEO_EXTS):
-        raise HTTPException(400, "File đã chọn không phải video hợp lệ")
+        raise HTTPException(400, "Selected file is not a valid video")
     return JSONResponse({"path": path})  # "" => user cancelled
 
 
@@ -315,18 +315,18 @@ async def browse(path: str = "") -> JSONResponse:
     try:
         p = p.resolve()
     except Exception:
-        raise HTTPException(400, "Đường dẫn không hợp lệ")
+        raise HTTPException(400, "Invalid path")
     if p.is_file():
         p = p.parent  # given a file -> browse its folder
     if not p.is_dir():
-        raise HTTPException(404, "Thư mục không tồn tại")
+        raise HTTPException(404, "Folder not found")
 
     dirs: List[dict] = []
     files: List[dict] = []
     try:
         children = sorted(p.iterdir(), key=lambda x: x.name.lower())
     except PermissionError:
-        raise HTTPException(403, "Không có quyền truy cập thư mục này")
+        raise HTTPException(403, "No permission to access this folder")
     for child in children:
         try:
             if child.is_dir():
@@ -421,10 +421,10 @@ class ProjectPayload(BaseModel):
 
 def _safe_project_path(name: str) -> Path:
     if not PROJECT_NAME_RE.match(name):
-        raise HTTPException(400, "Tên project chỉ được dùng chữ/số/khoảng trắng/_-. (max 80 ký tự)")
+        raise HTTPException(400, "Project name: letters/numbers/space/_-. only (max 80 chars)")
     p = (PROJ_DIR / f"{name}.json").resolve()
     if PROJ_DIR.resolve() not in p.parents:
-        raise HTTPException(400, "Đường dẫn không hợp lệ")
+        raise HTTPException(400, "Invalid path")
     return p
 
 
@@ -446,7 +446,7 @@ async def list_projects() -> JSONResponse:
 async def save_project(payload: ProjectPayload) -> JSONResponse:
     name = payload.name.strip()
     if not name:
-        raise HTTPException(400, "Tên project không được để trống")
+        raise HTTPException(400, "Project name must not be empty")
     path = _safe_project_path(name)
     data = payload.model_dump()
     data["name"] = name  # normalised
@@ -459,11 +459,11 @@ async def save_project(payload: ProjectPayload) -> JSONResponse:
 async def load_project(name: str) -> JSONResponse:
     path = _safe_project_path(name)
     if not path.is_file():
-        raise HTTPException(404, "Project không tồn tại")
+        raise HTTPException(404, "Project not found")
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except Exception as e:
-        raise HTTPException(500, f"Lỗi đọc project: {e}")
+        raise HTTPException(500, f"Failed to read project: {e}")
     return JSONResponse(data)
 
 
@@ -471,7 +471,7 @@ async def load_project(name: str) -> JSONResponse:
 async def delete_project(name: str) -> JSONResponse:
     path = _safe_project_path(name)
     if not path.is_file():
-        raise HTTPException(404, "Project không tồn tại")
+        raise HTTPException(404, "Project not found")
     path.unlink()
     return JSONResponse({"ok": True})
 
@@ -558,7 +558,7 @@ async def start_render(req: RenderRequest) -> JSONResponse:
     def resolve(name: str) -> Path:
         name = (name or "").strip()
         if not name:
-            raise HTTPException(400, "Clip thiếu video nguồn")
+            raise HTTPException(400, "Clip is missing a source video")
         if name not in resolved:
             resolved[name] = _safe_source_path(name)
         return resolved[name]
