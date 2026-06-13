@@ -9,6 +9,7 @@ import os
 import re
 import subprocess
 import sys
+import textwrap
 import threading
 import time
 import uuid
@@ -212,8 +213,59 @@ async def source_probe(path: str) -> JSONResponse:
 
 
 # --------------------------------------------------------------------------
-# Filesystem browser — lets the user pick a source video from any drive/folder
-# instead of copying it into workspace/raw. Local-only convenience.
+# Native OS "Open file" dialog — the real Windows Explorer picker. Runs in a
+# short-lived subprocess (tkinter) so it can't block the event loop or fight
+# uvicorn's threading; the dialog appears on the user's desktop (local app).
+# --------------------------------------------------------------------------
+class PickRequest(BaseModel):
+    initial_dir: str = ""
+
+
+def _native_pick(initial_dir: str) -> Optional[str]:
+    """Open the native file dialog and return the chosen absolute path.
+    Returns "" if the user cancels, or None if no GUI/tkinter is available."""
+    exts = " ".join(sorted(f"*{e}" for e in VIDEO_EXTS))
+    helper = textwrap.dedent(f"""
+        import os, tkinter as tk
+        from tkinter import filedialog
+        root = tk.Tk(); root.withdraw(); root.attributes("-topmost", True)
+        p = filedialog.askopenfilename(
+            title="Chon video nguon",
+            initialdir=(os.environ.get("HC_PICK_INITDIR") or None),
+            filetypes=[("Video", {exts!r}), ("Tat ca file", "*.*")],
+        )
+        root.destroy()
+        print(p or "")
+    """)
+    env = dict(os.environ, HC_PICK_INITDIR=initial_dir or "")
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-c", helper],
+            capture_output=True, text=True, timeout=600, env=env,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+        )
+    except Exception:
+        return None
+    if proc.returncode != 0:
+        return None
+    return (proc.stdout or "").strip()
+
+
+@app.post("/api/pick-file")
+def pick_file(req: PickRequest) -> JSONResponse:
+    # Sync def -> Starlette runs it in a threadpool, so the blocking dialog
+    # wait doesn't stall the async event loop.
+    path = _native_pick(req.initial_dir)
+    if path is None:
+        raise HTTPException(501, "Hộp thoại hệ thống không khả dụng")
+    if path and (not Path(path).is_file() or Path(path).suffix.lower() not in VIDEO_EXTS):
+        raise HTTPException(400, "File đã chọn không phải video hợp lệ")
+    return JSONResponse({"path": path})  # "" => user cancelled
+
+
+# --------------------------------------------------------------------------
+# Filesystem browser — in-app fallback picker (used if the native dialog is
+# unavailable). Lets the user pick a source video from any drive/folder.
 # --------------------------------------------------------------------------
 def _browse_shortcuts() -> List[dict]:
     sc: List[dict] = [{"name": "📁 workspace/raw", "path": str(RAW_DIR.resolve())}]

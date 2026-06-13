@@ -234,8 +234,46 @@ async function selectVideo(path) {
   saveState();
 }
 
-// ---- File browser modal --------------------------------------------
-function openBrowse() {
+// Directory portion of an absolute path (everything before the last separator).
+function dirName(p) {
+  if (!p) return "";
+  const s = String(p).replace(/[\\/]+$/, "");
+  const i = Math.max(s.lastIndexOf("\\"), s.lastIndexOf("/"));
+  return i >= 0 ? s.slice(0, i) : "";
+}
+
+// ---- Source picker --------------------------------------------------
+// Primary: ask the server to open the native OS "Open file" dialog (real
+// Windows Explorer). Fall back to the in-app browser modal if unavailable.
+async function openBrowse() {
+  const initDir = (currentVideo && /[\\/]/.test(currentVideo))
+    ? dirName(currentVideo)
+    : (lastBrowseDir || "");
+  const prevLabel = els.pickVideoLabel.textContent;
+  els.pickVideoBtn.disabled = true;
+  els.pickVideoLabel.textContent = "Đang mở hộp thoại chọn file…";
+  try {
+    const res = await fetch("/api/pick-file", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ initial_dir: initDir }),
+    });
+    if (!res.ok) throw new Error("native dialog unavailable");
+    const data = await res.json();
+    if (data.path) {
+      lastBrowseDir = dirName(data.path);
+      selectVideo(data.path);   // empty path => user cancelled, keep current
+    }
+  } catch (e) {
+    openBrowseModal();          // graceful fallback to the in-app browser
+  } finally {
+    els.pickVideoBtn.disabled = false;
+    els.pickVideoLabel.textContent = currentVideo ? baseName(currentVideo) : prevLabel;
+  }
+}
+
+// ---- In-app file browser modal (fallback) --------------------------
+function openBrowseModal() {
   els.browseModal.classList.remove("hidden");
   els.browseModal.setAttribute("aria-hidden", "false");
   // Open at: current video's folder > last browsed dir > drive root.
