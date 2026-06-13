@@ -226,7 +226,19 @@ def _native_pick(initial_dir: str) -> Optional[str]:
     Returns "" if the user cancels, or None if no GUI/tkinter is available."""
     exts = " ".join(sorted(f"*{e}" for e in VIDEO_EXTS))
     helper = textwrap.dedent(f"""
-        import os, tkinter as tk
+        import os
+        # Make the dialog DPI-aware so it renders crisp on high-DPI displays
+        # (default tkinter is DPI-unaware -> Windows bitmap-stretches it = blurry).
+        if os.name == "nt":
+            import ctypes
+            try:
+                ctypes.windll.shcore.SetProcessDpiAwareness(2)  # per-monitor v2
+            except Exception:
+                try:
+                    ctypes.windll.user32.SetProcessDPIAware()
+                except Exception:
+                    pass
+        import tkinter as tk
         from tkinter import filedialog
         root = tk.Tk(); root.withdraw(); root.attributes("-topmost", True)
         p = filedialog.askopenfilename(
