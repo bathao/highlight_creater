@@ -1,7 +1,8 @@
 # Highlight Creator — Project Status
 
-> Updated: 2026-06-15 (v1.3 — preview output playback + drag-and-drop event reordering)
-> Previous: 2026-06-15 (v1.2 — pick source from anywhere on disk, native file dialog, selectable output resolution, undo, English UI)
+> Updated: 2026-06-15 (v1.4 — text overlays burned into the final video, with a CapCut-style output timeline) — NOT yet committed
+> Previous: 2026-06-15 (v1.3 — preview output playback + drag-and-drop event reordering, commit `8c80dd7`)
+> Earlier: 2026-06-15 (v1.2 — pick source from anywhere on disk, native file dialog, selectable output resolution, undo, English UI)
 > Earlier: 2026-05-31 (v1.1 — multi-source input + UI refinements, commit `ed85265`)
 > Earlier: 2026-05-29 (multi-source input — stitch events from several source videos into one output)
 > Earlier: 2026-05-14 (background music for slow-motion)
@@ -61,12 +62,20 @@ highlight_creator/
 - [x] Path validation against traversal ([backend/main.py:96-111](backend/main.py#L96-L111))
 - [x] Auto-clean `workspace/temp` on startup/shutdown ([backend/main.py:467-475](backend/main.py#L467-L475))
 - [x] **English server messages** — error messages + native dialog title that surface in the UI are all English
+- [x] **Text overlays on the final video** (v1.4) — `TextOverlay` model + `drawtext` chain burned in a final re-encode pass (`concat_with_text`); when no text, the fast `-c copy` concat path is kept. Text content is written to a UTF-8 file and referenced via `textfile=` (no filtergraph escaping; Vietnamese diacritics safe). Color `#rrggbb`→`0x`, size = % of canvas height, position = centre fraction (`x=w*..-text_w/2`), black border for legibility ([backend/render.py](backend/render.py))
+- [x] **Font families + Bold/Italic** (v1.4) — `FONT_FAMILIES` (Arial / Segoe UI / Impact / Times / Consolas) resolve to the right Windows variant file (e.g. `arialbi.ttf` for bold+italic); falls back to regular when a family lacks the variant (Impact). Legacy keys (`arial-bold`) still resolve ([backend/render.py](backend/render.py))
+- [x] **Output-relative text timing + intro offset** (v1.4) — overlay start/end are seconds on the preview/output timeline (intro excluded); `_enable_expr(start,end,offset)` shifts them onto the final timeline (adds the intro) via `enable='between(t,..)'`. Blank window = always on ([backend/render.py](backend/render.py))
+- [x] **`/api/render` accepts `texts`** — `TextOverlayModel` validated (≤20, drops blank) and mapped to `TextOverlay` ([backend/main.py](backend/main.py))
 
 ### Frontend
 - [x] Responsive 3-column layout (Setup · Player+Events · Render) ([frontend/style.css:56-75](frontend/style.css#L56-L75))
 - [x] **English UI** — every title, button, placeholder, hint, dynamic status/summary text, and alert/confirm unified to English (v1.2)
 - [x] **Preview output** (v1.3) — "Preview output" toggle plays the assembled highlight in render order: each event's real-speed segment + slow-mo replay (when on), switching the player to each event's source (multi-source aware) and skipping the dead-time between events. Subtle accent transport bar (pulsing dot, ⏮/Play/⏭, "Event N/M · Real|Slow-mo" chip, output-position/total readout, ✕ / Esc exit); intro card excluded (no live source). Pure playback aid — never mutates clips/project; auto-exits on any structural edit ([frontend/app.js:788-1000](frontend/app.js#L788-L1000))
 - [x] **Drag-and-drop event reordering** (v1.3) — each event row has a ⠿ grip in the # column; drag to reorder with a blue insertion-line indicator. Row is draggable only while the grip is held, so inline time inputs / SLO checkbox stay clickable; wired via tbody delegation so it survives re-renders. `reorderClips` moves in one gesture, pushes undo + persists (↑/↓ buttons kept for single-step / keyboard) ([frontend/app.js](frontend/app.js))
+- [x] **Text overlay editor in the Preview-output context** (v1.4) — the text panel lives inside the player card and appears only while Preview output is on (so text is edited against the real kept-segment output, beside the video — not in a card far below 40-50 events). Each row: text, font family, **Bold/Italic** toggles (disabled for Impact), size %, color picker; window shown read-only ([frontend/app.js](frontend/app.js))
+- [x] **Live draggable label on the player** (v1.4) — each overlay renders over the video with its real font/size/color; **drag to position** (stores centre as a fraction of the canvas). Playing → labels show/hide by their time window; paused → all shown for positioning ([frontend/app.js](frontend/app.js))
+- [x] **CapCut-style output timeline** (v1.4) — a base video track (the kept segments) + one lane per text whose bar = its `[start,end]` window. Drag a bar to move, drag its edges to trim, drag to full width = whole video, click a bar to select/edit that text; click empty area to scrub the output (red playhead syncs with playback) ([frontend/app.js](frontend/app.js))
+- [x] **±5s seek on the output timeline** (v1.4) — in the Preview-output transport, `−5s`/`+5s` step along the assembled output (skips dead-time, crosses segments/sources) ([frontend/app.js](frontend/app.js))
 - [x] **Pick source from anywhere on disk** — "Choose source video…" button calls the native dialog first ([frontend/app.js:250](frontend/app.js#L250)), falling back to the in-app browser modal (navigate drives/folders, breadcrumb path bar, shortcuts, Esc/backdrop to close) if unavailable ([frontend/app.js:278-290](frontend/app.js#L278-L290)). Sources are identified by absolute path, displayed by basename; legacy clips/projects with bare names keep working with no migration ([frontend/index.html:61-66](frontend/index.html#L61-L66))
 - [x] **Output resolution picker in Setup card** — dropdown offers only standard tiers (720p / 1K·1080p / 2K·1440p) whose height ≤ the canvas source height (never upscales; >1440p sources cap at 2K). Re-evaluates when the canvas source changes (select video, add/remove/reorder clips, load project); persists to `localStorage` ([frontend/index.html:72-73](frontend/index.html#L72-L73), [frontend/app.js:376-420](frontend/app.js#L376-L420))
 - [x] **Undo for highlight events** — ↩ Undo button + Ctrl+Z snapshots `clips` before each structural change (add/delete/reorder/clear/time-edit) so a mis-deleted event is restored one step at a time (stack capped at 50, cleared on project load, button disabled when empty) ([frontend/app.js:581-598](frontend/app.js#L581-L598), [frontend/index.html:146](frontend/index.html#L146))
@@ -80,7 +89,8 @@ highlight_creator/
 - [x] **Multi-source UI** — switch videos to add events from several sources; each event carries its `video` + a `V1/V2…` badge in the "Src" column; preview auto-switches the player to the right source ([frontend/app.js:350-395](frontend/app.js#L350-L395), [457-490](frontend/app.js#L457-L490))
 - [x] **Auto-persist state** to `localStorage` (tournament, players, slow %, clips with source, selected video, output height) + **migration v1→v2** (backfill `video` for old clips) ([frontend/app.js:74-136](frontend/app.js#L74-L136))
 - [x] **SSE listener** + progress bar with shimmer, error state ([frontend/app.js:737-781](frontend/app.js#L737-L781))
-- [x] **Render summary** real-time: total events, slow-mo, intro, output — shown as **mm:ss** (`fmtClock`) ([frontend/app.js:519-541](frontend/app.js#L519-L541))
+- [x] **Render summary** real-time: total events, slow-mo, intro, output — shown as **mm:ss** (`fmtClock`); also shows text-overlay count ([frontend/app.js](frontend/app.js))
+- [x] **Auto-persist `texts`** to localStorage + project payload (additive/backward-compatible — old states/projects without `texts` load as none) ([frontend/app.js](frontend/app.js))
 
 ### DevOps / Launcher
 - [x] `start.bat` 1-click: auto-create venv, install deps, check ffmpeg, free port :8770, open browser ([start.bat:1-127](start.bat#L1-L127))
@@ -96,7 +106,7 @@ highlight_creator/
 - [ ] **Tests** — no unit/integration tests
 - [ ] **Job history** — closing the tab loses everything; old jobs aren't viewable (`GET /api/outputs` exists, not wired)
 - [ ] **Audio post-processing** — no loudness normalize / fade in-out between segments
-- [ ] **Subtitle / player-name overlay** per event
+- [x] ~~**Text / title overlay**~~ — DONE 2026-06-15 (v1.4): free text overlays on the final video (font/B-I/size/color/position + timed window via the output timeline). NOTE: applies to the main render only, **not** the per-event Export / Export + Replay
 - [x] ~~**Multi-video timeline**~~ — DONE 2026-05-29: stitch events from several sources into one output
 - [x] ~~**Selectable output resolution**~~ — DONE 2026-06-15: 720p–2K picker, never upscales
 - [x] ~~**Pick source from anywhere on disk**~~ — DONE 2026-06-15: native dialog + in-app browser fallback
@@ -118,7 +128,8 @@ highlight_creator/
 |---|---|---|
 | Encoder | `h264_nvenc -preset p5 -cq 20` | Tuned `hq`, VBR — high quality + fast on RTX Ada/Blackwell |
 | Decoder | `-hwaccel cuda` (real) / default (slow) | Slow-mo drops hwaccel_output_format because `setpts` is a CPU filter |
-| Concat | Demuxer + `-c copy` | Every segment normalized to the same codec/resolution/fps for instant stitch |
+| Concat | Demuxer + `-c copy` (no text) / re-encode + `drawtext` (with text) | Text overlays force one final NVENC pass so `t` = final-timeline time; audio still `-c copy` |
+| Text overlays | `drawtext` with `textfile=` (UTF-8) | Avoids filtergraph escaping; output-relative timing, intro added via `enable` offset; main render only |
 | Output res | `out_height` downscale (0 = native) | Standard tiers only, never upscales; >1440p caps at 2K |
 | Source path | `_safe_source_path` resolves any absolute path | Local-only app; bare filenames still resolve under `workspace/raw` |
 | Audio | AAC 48kHz stereo 192k | Uniform across segments; intro gets anullsrc if source has audio |
@@ -146,6 +157,7 @@ Open http://127.0.0.1:8770, click **Choose source video…** to pick footage fro
 
 ## 6. Suggested next steps
 
+0. **Commit v1.4** (text overlays) — currently working in the tree but not yet committed
 1. **Write README.md** with screenshots + a workflow demo GIF
 2. **Create a `start` shell script** for Linux/macOS users (if cross-platform is needed)
 3. **Add `pytest`** tests for `render._atempo_chain`, `render._expected_total_duration`, source/project path validation
