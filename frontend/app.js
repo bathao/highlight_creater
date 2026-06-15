@@ -34,6 +34,16 @@ const els = {
   highlightText: $("highlightText"),
   captureStatus: $("captureStatus"),
 
+  // Preview-output transport
+  previewOutputBtn: $("previewOutputBtn"),
+  previewBar: $("previewBar"),
+  pvPrev: $("pvPrev"),
+  pvPlay: $("pvPlay"),
+  pvNext: $("pvNext"),
+  pvPhase: $("pvPhase"),
+  pvTime: $("pvTime"),
+  pvExit: $("pvExit"),
+
   clipsBody: $("clipsBody"),
   clipCount: $("clipCount"),
   clearClips: $("clearClips"),
@@ -465,9 +475,9 @@ els.player.addEventListener("durationchange", () => {
   updatePlayerTime();
 });
 els.player.addEventListener("progress", updateBuffered);
-els.player.addEventListener("play",  updatePlayBtn);
-els.player.addEventListener("pause", updatePlayBtn);
-els.player.addEventListener("ended", updatePlayBtn);
+els.player.addEventListener("play",  () => { updatePlayBtn(); pvSyncPlayBtn(); });
+els.player.addEventListener("pause", () => { updatePlayBtn(); pvSyncPlayBtn(); });
+els.player.addEventListener("ended", () => { updatePlayBtn(); pvSyncPlayBtn(); });
 
 // ---- Custom control bar ---------------------------------------------
 els.playBtn.addEventListener("click", () => {
@@ -582,6 +592,8 @@ function flashMsg(msg) {
 // Snapshot `clips` before each structural change so the Undo button (and
 // Ctrl+Z) can step back one action at a time.
 function pushClipUndo() {
+  // Any structural edit invalidates the live preview plan — leave preview mode.
+  if (pvMode) pvExit();
   clipUndoStack.push(JSON.parse(JSON.stringify(clips)));
   if (clipUndoStack.length > 50) clipUndoStack.shift();
   updateUndoBtn();
@@ -644,6 +656,24 @@ function moveClip(id, dir) {
   saveState();
 }
 
+// Move `draggedId` to sit just before/after `targetId` (used by drag & drop).
+// Same effect as repeated moveClip but in one gesture — handy for 30-50 events.
+function reorderClips(draggedId, targetId, before) {
+  if (draggedId === targetId) return;
+  const fromIdx = clips.findIndex(c => c.id === draggedId);
+  const targetIdx = clips.findIndex(c => c.id === targetId);
+  if (fromIdx < 0 || targetIdx < 0) return;
+  pushClipUndo();
+  const [moved] = clips.splice(fromIdx, 1);
+  // Recompute the target index after removing the dragged item, then insert.
+  let insertIdx = clips.findIndex(c => c.id === targetId);
+  if (!before) insertIdx += 1;
+  clips.splice(insertIdx, 0, moved);
+  renderClipsTable();
+  refreshResolutionOptions();  // reorder may change clip[0] = the canvas source
+  saveState();
+}
+
 function renderClipsTable() {
   els.clipCount.textContent = clips.length;
   if (!clips.length) {
@@ -654,6 +684,7 @@ function renderClipsTable() {
   els.clipsBody.innerHTML = "";
   clips.forEach((c, idx) => {
     const tr = document.createElement("tr");
+    tr.dataset.id = c.id;
     const checked = c.slowmo === false ? "" : "checked";
     const srcVideo = c.video || "";
     tr.innerHTML = `
@@ -661,7 +692,7 @@ function renderClipsTable() {
         <input type="checkbox" data-id="${c.id}" data-field="slowmo" ${checked}
                title="Slow-motion for this event (uncheck = real-speed only)" />
       </td>
-      <td>${idx + 1}</td>
+      <td class="cell-num"><span class="drag-grip" title="Drag to reorder">⠿</span><span class="num">${idx + 1}</span></td>
       <td class="src"><span class="src-badge" title="${srcVideo.replace(/"/g, "&quot;")}">${sourceBadge(srcVideo)}</span></td>
       <td><input class="t-input" data-id="${c.id}" data-field="start" value="${fmt(c.start)}" /></td>
       <td><input class="t-input" data-id="${c.id}" data-field="end" value="${fmt(c.end)}" /></td>
@@ -730,9 +761,91 @@ els.clipsBody.addEventListener("change", (e) => {
   saveState();
 });
 
+// ---- Drag & drop reordering -----------------------------------------
+// Rows reorder by dragging the ⠿ grip in the # column. The row is only made
+// draggable while the grip is held, so the inline time inputs/checkboxes stay
+// fully clickable. Wired via delegation on the tbody so it survives the full
+// re-render that renderClipsTable() does after every change.
+let dragId = null;
+
+function clearDropMarkers() {
+  els.clipsBody.querySelectorAll(".drop-before, .drop-after")
+    .forEach(tr => tr.classList.remove("drop-before", "drop-after"));
+}
+
+// Where would a drop on `tr` land — before it (cursor in top half) or after?
+function dropBefore(tr, clientY) {
+  const r = tr.getBoundingClientRect();
+  return (clientY - r.top) < r.height / 2;
+}
+
+els.clipsBody.addEventListener("mousedown", (e) => {
+  if (e.button !== 0) return;
+  const tr = e.target.closest("tr[data-id]");
+  if (tr && e.target.closest(".drag-grip")) tr.draggable = true;
+});
+
+// A grip click that doesn't turn into a drag must clear the draggable flag,
+// otherwise the row would swallow text selection in its inputs afterwards.
+els.clipsBody.addEventListener("mouseup", (e) => {
+  if (dragId !== null) return;
+  const tr = e.target.closest("tr[data-id]");
+  if (tr) tr.draggable = false;
+});
+
+els.clipsBody.addEventListener("dragstart", (e) => {
+  const tr = e.target.closest("tr[data-id]");
+  if (!tr) return;
+  dragId = parseInt(tr.dataset.id, 10);
+  tr.classList.add("dragging");
+  e.dataTransfer.effectAllowed = "move";
+  try { e.dataTransfer.setData("text/plain", String(dragId)); } catch (_) { /* Firefox needs data set */ }
+});
+
+els.clipsBody.addEventListener("dragover", (e) => {
+  if (dragId === null) return;
+  e.preventDefault();
+  e.dataTransfer.dropEffect = "move";
+  const tr = e.target.closest("tr[data-id]");
+  clearDropMarkers();
+  if (tr && parseInt(tr.dataset.id, 10) !== dragId) {
+    tr.classList.add(dropBefore(tr, e.clientY) ? "drop-before" : "drop-after");
+  }
+});
+
+els.clipsBody.addEventListener("drop", (e) => {
+  if (dragId === null) return;
+  e.preventDefault();
+  const tr = e.target.closest("tr[data-id]");
+  if (tr) {
+    const targetId = parseInt(tr.dataset.id, 10);
+    reorderClips(dragId, targetId, dropBefore(tr, e.clientY));
+  }
+  clearDropMarkers();
+  dragId = null;
+});
+
+els.clipsBody.addEventListener("dragend", () => {
+  dragId = null;
+  clearDropMarkers();
+  els.clipsBody.querySelectorAll("tr[data-id]").forEach(tr => {
+    tr.classList.remove("dragging");
+    tr.draggable = false;
+  });
+});
+
 let previewWatchdog = null;
-function previewClip(clip) {
+let _singleClipWatcher = null;
+function clearSingleClipPreview() {
   if (previewWatchdog) { clearTimeout(previewWatchdog); previewWatchdog = null; }
+  if (_singleClipWatcher) {
+    els.player.removeEventListener("timeupdate", _singleClipWatcher);
+    _singleClipWatcher = null;
+  }
+}
+function previewClip(clip) {
+  if (pvMode) pvExit();        // single-clip preview takes over from output preview
+  clearSingleClipPreview();
   // If this clip belongs to a different source than the one loaded, switch the
   // player to that source first, then seek once the new media is ready.
   if (clip.video && clip.video !== currentVideo) {
@@ -753,14 +866,163 @@ function _playClipRange(clip) {
   const watcher = () => {
     if ((els.player.currentTime || 0) >= stopAt) {
       els.player.pause();
-      els.player.removeEventListener("timeupdate", watcher);
+      clearSingleClipPreview();
     }
   };
+  _singleClipWatcher = watcher;
   els.player.addEventListener("timeupdate", watcher);
   previewWatchdog = setTimeout(() => {
     els.player.pause();
-    els.player.removeEventListener("timeupdate", watcher);
+    clearSingleClipPreview();
   }, (clip.end - clip.start) * 1000 + 1500);
+}
+
+// ---- Preview output (play the assembled highlight in render order) --
+// The render output is intro + for each event: a real-speed segment and,
+// when slow-mo is on, a slow-motion replay of the same range. Preview plays
+// that exact sequence in the existing <video>: it switches the player to each
+// event's source (multi-source aware), seeks to the event's range, sets the
+// playback rate (1× for real, slow_percent/100 for the replay), and advances
+// to the next segment when the current one ends — so the operator watches only
+// the kept footage, in order, with the dead-time between events skipped.
+//
+// This is a pure playback aid: it reads `clips`/slow/intro but never mutates
+// them or the saved-project payload, so projects stay consistent.
+let pvMode = false;
+let pvPlan = [];      // [{clipIdx, kind:'real'|'slow', video, start, end, srcDur, rate, outDur, outStart}]
+let pvPos = 0;        // index of the segment currently playing
+let pvTotal = 0;      // total output duration of the previewed segments (excl. intro)
+let pvWatcher = null; // timeupdate handler for the active segment
+let pvWatchdog = null;
+let pvSwitching = false; // true while awaiting a source switch (loadeddata)
+
+// Build the segment plan from the current clips + slow setting. Mirrors what
+// run_job renders: real segment per event, plus a slow replay when slowmo is on.
+function buildPvPlan() {
+  const v = parseInt(els.slowSlider.value, 10) || 100;
+  const factor = 100 / v;          // e.g. 50% -> 2× longer in the output
+  const rate = v / 100;            // playback speed of the replay (e.g. 0.5)
+  const plan = [];
+  let acc = 0;
+  clips.forEach((c, idx) => {
+    const srcDur = Math.max(0, c.end - c.start);
+    plan.push({ clipIdx: idx, kind: "real", video: c.video, start: c.start, end: c.end,
+                srcDur, rate: 1, outDur: srcDur, outStart: acc });
+    acc += srcDur;
+    if (c.slowmo !== false) {
+      plan.push({ clipIdx: idx, kind: "slow", video: c.video, start: c.start, end: c.end,
+                  srcDur, rate, outDur: srcDur * factor, outStart: acc });
+      acc += srcDur * factor;
+    }
+  });
+  pvTotal = acc;
+  return plan;
+}
+
+function pvClearWatch() {
+  if (pvWatcher) { els.player.removeEventListener("timeupdate", pvWatcher); pvWatcher = null; }
+  if (pvWatchdog) { clearTimeout(pvWatchdog); pvWatchdog = null; }
+}
+
+function pvEnter() {
+  if (!clips.length) { flashTopMessage("Add highlight events to preview"); return; }
+  if (!clips.every(c => c.video)) { flashTopMessage("Some events have no source video"); return; }
+  clearSingleClipPreview();
+  pvPlan = buildPvPlan();
+  pvMode = true;
+  els.previewBar.classList.remove("hidden");
+  els.previewOutputBtn.classList.add("active");
+  els.previewOutputBtn.textContent = "■ Stop preview";
+  const intro = parseFloat(els.introSeconds.value || "0");
+  flashTopMessage(`Preview output — ${pvPlan.length} segment(s)${intro ? `, intro ${intro}s not shown` : ""}`);
+  pvStartSegment(0, true);
+}
+
+function pvExit() {
+  if (!pvMode) return;
+  pvMode = false;
+  pvSwitching = false;
+  pvClearWatch();
+  els.player.pause();
+  els.player.playbackRate = parseFloat(els.speedSelect.value) || 1;
+  els.previewBar.classList.add("hidden");
+  els.previewOutputBtn.classList.remove("active");
+  els.previewOutputBtn.textContent = "▶ Preview output";
+}
+
+function pvStartSegment(i, autoplay) {
+  if (i < 0 || i >= pvPlan.length) { pvFinish(); return; }
+  pvPos = i;
+  pvClearWatch();
+  const seg = pvPlan[i];
+  const begin = () => {
+    pvSwitching = false;
+    els.player.currentTime = seg.start;
+    els.player.playbackRate = seg.rate;
+    if (autoplay) els.player.play().catch(() => {});
+    pvAttachWatch(seg);
+    pvUpdateBar();
+  };
+  if (seg.video && seg.video !== currentVideo) {
+    pvSwitching = true;
+    const onReady = () => {
+      els.player.removeEventListener("loadeddata", onReady);
+      if (pvMode) begin();
+    };
+    els.player.addEventListener("loadeddata", onReady);
+    selectVideo(seg.video);
+  } else {
+    begin();
+  }
+  pvUpdateBar();
+}
+
+function pvAttachWatch(seg) {
+  const watcher = () => {
+    if ((els.player.currentTime || 0) >= seg.end - 0.03) {
+      pvAdvance();
+    } else {
+      pvUpdateBar();
+    }
+  };
+  pvWatcher = watcher;
+  els.player.addEventListener("timeupdate", watcher);
+  // Wall-clock fallback: a real segment plays in srcDur seconds, a slow one in
+  // srcDur/rate = outDur seconds. Add slack for buffering/source switching.
+  pvWatchdog = setTimeout(pvAdvance, seg.outDur * 1000 + 2000);
+}
+
+function pvAdvance() {
+  if (!pvMode) return;
+  pvClearWatch();
+  if (pvPos + 1 >= pvPlan.length) { pvFinish(); return; }
+  pvStartSegment(pvPos + 1, true);
+}
+
+function pvFinish() {
+  pvClearWatch();
+  els.player.pause();
+  pvSyncPlayBtn();
+  flashTopMessage("Preview finished");
+}
+
+function pvPrev() { if (pvMode) pvStartSegment(Math.max(0, pvPos - 1), true); }
+function pvNext() { if (pvMode && pvPos + 1 < pvPlan.length) pvStartSegment(pvPos + 1, true); }
+
+function pvUpdateBar() {
+  if (!pvMode || !pvPlan.length) return;
+  const seg = pvPlan[pvPos];
+  els.pvPhase.textContent =
+    `Event ${seg.clipIdx + 1}/${clips.length} · ${seg.kind === "slow" ? "Slow-mo" : "Real"}`;
+  const ct = els.player.currentTime || 0;
+  const within = Math.max(0, Math.min(seg.srcDur, ct - seg.start)) * (seg.outDur / (seg.srcDur || 1));
+  els.pvTime.textContent = `${fmt(seg.outStart + within)} / ${fmt(pvTotal)}`;
+  els.pvPrev.disabled = pvPos === 0;
+  els.pvNext.disabled = pvPos + 1 >= pvPlan.length;
+}
+
+function pvSyncPlayBtn() {
+  els.pvPlay.textContent = els.player.paused ? "▶" : "❚❚";
 }
 
 // ---- Render summary -------------------------------------------------
@@ -778,6 +1040,7 @@ function refreshRenderSummary() {
   const allHaveSource = clips.length > 0 && clips.every(c => c.video);
   const ok = allHaveSource;
   els.renderBtn.disabled = !ok;
+  if (els.previewOutputBtn) els.previewOutputBtn.disabled = !ok;
 
   if (!clips.length) {
     els.renderSummary.innerHTML = currentVideo
@@ -825,7 +1088,8 @@ function applyProjectPayload(p) {
     // Migration: old projects stored clips without `video` (single-source) -> backfill.
     video: c.video || p.video || "",
   }));
-  // Loading a project is a fresh context — drop undo history from the old one.
+  // Loading a project is a fresh context — leave preview and drop undo history.
+  if (pvMode) pvExit();
   clipUndoStack = [];
   updateUndoBtn();
   renderClipsTable();
@@ -1100,7 +1364,9 @@ els.browsePath.addEventListener("keydown", (e) => {
   if (e.key === "Enter") { e.preventDefault(); loadBrowse(els.browsePath.value.trim()); }
 });
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape" && !els.browseModal.classList.contains("hidden")) closeBrowse();
+  if (e.key !== "Escape") return;
+  if (!els.browseModal.classList.contains("hidden")) closeBrowse();
+  else if (pvMode) pvExit();
 });
 
 els.slowSlider.addEventListener("input", updateSlowLabel);
@@ -1115,6 +1381,16 @@ els.player1.addEventListener("change", saveState);
 els.player2.addEventListener("change", saveState);
 
 els.highlightBtn.addEventListener("click", toggleHighlight);
+
+// Preview-output transport
+els.previewOutputBtn.addEventListener("click", () => { pvMode ? pvExit() : pvEnter(); });
+els.pvPlay.addEventListener("click", () => {
+  if (!els.player.src) return;
+  if (els.player.paused) els.player.play(); else els.player.pause();
+});
+els.pvPrev.addEventListener("click", pvPrev);
+els.pvNext.addEventListener("click", pvNext);
+els.pvExit.addEventListener("click", pvExit);
 
 els.saveProjectBtn.addEventListener("click", saveProject);
 els.loadProjectBtn.addEventListener("click", loadProject);

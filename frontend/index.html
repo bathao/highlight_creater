@@ -125,11 +125,33 @@
             <option value="2">2x</option>
           </select>
         </label>
+        <button class="ctrl-btn preview-toggle" id="previewOutputBtn"
+                title="Preview the assembled highlight output — plays every event in order (slow-mo replays included), skipping the dead-time between them" disabled>
+          ▶ Preview output
+        </button>
         <button class="ctrl-btn highlight" id="highlightBtn" title="Mark a highlight event (I/O)">
           <span class="hl-dot"></span>
           <span id="highlightText">Highlight start/end</span>
         </button>
       </div>
+    </div>
+
+    <!-- Preview-output transport: visible only while "Preview output" is on.
+         Plays the clips in render order (slow-mo replay phases included),
+         switching the player to each event's source and skipping the
+         dead-time between events. Navigation is by output segment; the
+         readout shows output-position / total-output (intro card excluded,
+         since it's a rendered card with no live preview). -->
+    <div class="preview-bar hidden" id="previewBar">
+      <span class="pv-badge"><span class="pv-dot"></span> Preview output</span>
+      <span class="pv-transport">
+        <button class="pv-btn" id="pvPrev" title="Previous segment">⏮</button>
+        <button class="pv-btn pv-play" id="pvPlay" title="Play / Pause">❚❚</button>
+        <button class="pv-btn" id="pvNext" title="Next segment">⏭</button>
+      </span>
+      <span class="pv-phase" id="pvPhase">Event 1/1 · Real</span>
+      <span class="pv-time" id="pvTime" title="output position / total output">0:00.00 / 0:00.00</span>
+      <button class="pv-exit" id="pvExit" title="Exit preview (Esc)">✕</button>
     </div>
 
     <div class="player-meta">
