@@ -1,138 +1,154 @@
-# Highlight Creator — Tiến độ dự án
+# Highlight Creator — Project Status
 
-> Cập nhật: 2026-05-31 (v1.1 — multi-source input + UI refinements, đã commit `ed85265`)
-> Trước đó: 2026-05-29 (multi-source input — ghép pha từ nhiều video nguồn vào 1 output)
-> Trước nữa: 2026-05-14 (thêm nhạc nền cho slow-motion)
-> Web app local (FastAPI + Vanilla JS) để tạo video highlight từ video gốc, với intro card và slow-motion replay, dùng NVENC (RTX) để render nhanh.
+> Updated: 2026-06-15 (v1.3 — preview output playback + drag-and-drop event reordering)
+> Previous: 2026-06-15 (v1.2 — pick source from anywhere on disk, native file dialog, selectable output resolution, undo, English UI)
+> Earlier: 2026-05-31 (v1.1 — multi-source input + UI refinements, commit `ed85265`)
+> Earlier: 2026-05-29 (multi-source input — stitch events from several source videos into one output)
+> Earlier: 2026-05-14 (background music for slow-motion)
+> Local web app (FastAPI + Vanilla JS) for building highlight videos from source footage, with an intro card and slow-motion replay, using NVENC (RTX) for fast rendering.
 
 ---
 
-## 1. Kiến trúc tổng quan
+## 1. Overall architecture
 
 ```
 highlight_creator/
 ├── backend/
-│   ├── main.py        # FastAPI app — routes, SSE progress, project CRUD
-│   └── render.py      # Pipeline ffmpeg: probe → intro → real/slow → concat
+│   ├── main.py        # FastAPI app — routes, SSE progress, project CRUD, file picker/browser
+│   └── render.py      # ffmpeg pipeline: probe → intro → real/slow → concat
 ├── frontend/
-│   ├── index.html     # 4 card: Setup · Player · Clips · Render
-│   ├── app.js         # State, capture (I/O), timeline, projects, SSE
-│   └── style.css      # Theme tối, grid 3-cột responsive
+│   ├── index.html     # 4 cards: Setup · Player · Highlight Events · Render
+│   ├── app.js         # State, capture (I/O), timeline, projects, SSE, undo, file browser
+│   └── style.css      # Dark theme, responsive 3-column grid
 ├── workspace/
-│   ├── raw/           # Video nguồn (đặt video vào đây)
-│   ├── output/        # File highlight đã render
-│   ├── projects/      # Project đã lưu (JSON)
-│   └── temp/          # Segment trung gian (tự dọn sau mỗi job)
+│   ├── raw/           # Optional source location (sources can now live anywhere on disk)
+│   ├── output/        # Rendered highlight files
+│   ├── projects/      # Saved projects (JSON)
+│   └── temp/          # Intermediate segments (auto-cleaned after each job)
 ├── sounds/
-│   └── slow_motion.mp3  # Nhạc nền cho mọi slow-motion segment (auto-loop)
+│   └── slow_motion.mp3  # Background music for every slow-motion segment (auto-loop)
 ├── requirements.txt   # fastapi, uvicorn, pillow, jinja2, python-multipart
-└── start.bat          # Launcher 1-click: venv → deps → uvicorn :8770
+└── start.bat          # 1-click launcher: venv → deps → uvicorn :8770
 ```
 
 **Stack:** Python 3.10+ · FastAPI 0.115 · Uvicorn · Pillow · FFmpeg (NVENC h264) · Vanilla JS (no framework)
 
 ---
 
-## 2. Tính năng đã hoàn thành
+## 2. Completed features
 
 ### Backend
-- [x] FastAPI app với static mount cho frontend + cache-bust theo mtime ([backend/main.py:51-64](backend/main.py#L51-L64))
-- [x] List video trong `workspace/raw` ([backend/main.py:70-80](backend/main.py#L70-L80))
-- [x] Probe video (width/height/fps/duration/has_audio) qua ffprobe ([backend/render.py:142-172](backend/render.py#L142-L172))
-- [x] **Byte-range streaming** (HTTP 206) cho scrub mượt trên video 2K/4K ([backend/main.py:114-167](backend/main.py#L114-L167))
+- [x] FastAPI app with static mount for frontend + mtime-based cache-bust ([backend/main.py:51-64](backend/main.py#L51-L64))
+- [x] **Source path resolution** — `_safe_source_path` resolves any absolute path (local-only app); bare filenames still resolve under `workspace/raw` for backward compat ([backend/main.py:106](backend/main.py#L106))
+- [x] **Native file dialog** — `POST /api/pick-file` opens the real OS "Open file" dialog via a short-lived tkinter subprocess (sync endpoint → Starlette threadpool so the blocking wait never stalls the event loop; `CREATE_NO_WINDOW` hides the console). Returns `""` on cancel, 501 if no GUI. DPI-aware (per-monitor-v2, fallback system-aware) so it renders crisp on high-DPI displays ([backend/main.py:230-266](backend/main.py#L230-L266))
+- [x] **In-app filesystem browser** — `GET /api/browse` lists drives + folders + video files as a fallback when the native dialog is unavailable ([backend/main.py:308](backend/main.py#L308))
+- [x] **Serve any path by byte-range** — `GET /api/source-stream` + `GET /api/source-probe` serve any absolute source path (HTTP 206) for smooth scrubbing on 2K/4K video ([backend/main.py:203-209](backend/main.py#L203-L209))
+- [x] Probe video (width/height/fps/duration/has_audio) via ffprobe ([backend/render.py:142-172](backend/render.py#L142-L172))
 - [x] **Render pipeline** intro + (real, slow)*N + concat `-c copy` ([backend/render.py:474-582](backend/render.py#L474-L582))
-- [x] **Multi-source input** — mỗi clip mang `video_path` riêng; `run_job` probe từng nguồn, lấy canvas = video đầu tiên, scale giữ aspect + letterbox (`force_original_aspect_ratio=decrease` + `pad` + `setsar=1`) nên ghép được video khác độ phân giải/fps/tỉ lệ ([backend/render.py:285-292](backend/render.py#L285-L292), [557-590](backend/render.py#L557-L590))
-- [x] **Audio đồng nhất đa nguồn** — `need_audio = any(source có audio)`; nguồn câm được chèn track `anullsrc` im lặng để `concat -c copy` không vỡ ([backend/render.py:365-410](backend/render.py#L365-L410))
-- [x] **Intro card** sinh PNG bằng Pillow (giải đấu + VĐV1 vs VĐV2) ([backend/render.py:188-238](backend/render.py#L188-L238))
-- [x] **Slow-motion** với `setpts` + `atempo` chain (fallback nếu không có nhạc nền), badge "SLOW MOTION" góc phải ([backend/render.py:297-318](backend/render.py#L297-L318))
-- [x] **Nhạc nền slow-motion** — thay audio gốc bằng `sounds/slow_motion.mp3`, auto-loop nếu pha dài hơn nhạc, cap đúng `out_duration` ([backend/render.py:391-468](backend/render.py#L391-L468))
-- [x] **NVENC h264** preset p5, CQ 20 — tuned cho RTX 5060 Ti ([backend/render.py:54-62](backend/render.py#L54-L62))
-- [x] **SSE progress stream** real-time cho từng job ([backend/main.py:429-461](backend/main.py#L429-L461))
-- [x] **Job cancel** qua `threading.Event` ([backend/main.py:408-414](backend/main.py#L408-L414))
-- [x] **Export single clip** (real-only hoặc real + slow-mo replay) ([backend/main.py:332-365](backend/main.py#L332-L365))
-- [x] **Project CRUD** save/load/list/delete (JSON trong `workspace/projects`) ([backend/main.py:256-301](backend/main.py#L256-L301))
-- [x] **List outputs** endpoint `GET /api/outputs` — liệt kê file đã render kèm `size_mb`/`mtime` ([backend/main.py:213-224](backend/main.py#L213-L224)) — ⚠️ frontend chưa gọi (sẵn để wire vào Job history)
-- [x] **Open folder** trong File Explorer (Windows/macOS/Linux) ([backend/main.py:188-210](backend/main.py#L188-L210))
-- [x] Validate path để chống path traversal ([backend/main.py:96-111](backend/main.py#L96-L111))
-- [x] Tự dọn `workspace/temp` khi startup/shutdown ([backend/main.py:467-475](backend/main.py#L467-L475))
+- [x] **Selectable output resolution** — `RenderJob.out_height` downscales the canvas (aspect preserved, even dims) before each segment is scaled onto it; `0` = native. Wired through both `/api/render` and `/api/export-clip` ([backend/main.py:497-507](backend/main.py#L497-L507), [backend/render.py:597-598](backend/render.py#L597-L598))
+- [x] **Multi-source input** — each clip carries its own `video_path`; `run_job` probes every source, canvas = first video, scales keeping aspect + letterbox (`force_original_aspect_ratio=decrease` + `pad` + `setsar=1`) so sources of different resolution/fps/ratio stitch cleanly ([backend/render.py:285-292](backend/render.py#L285-L292), [557-590](backend/render.py#L557-L590))
+- [x] **Uniform multi-source audio** — `need_audio = any(source has audio)`; silent sources get an `anullsrc` track so `concat -c copy` doesn't break ([backend/render.py:365-410](backend/render.py#L365-L410))
+- [x] **Intro card** PNG generated with Pillow (tournament + Player 1 vs Player 2) ([backend/render.py:188-238](backend/render.py#L188-L238))
+- [x] **Slow-motion** with `setpts` + `atempo` chain (fallback when no music), "SLOW MOTION" badge top-right ([backend/render.py:297-318](backend/render.py#L297-L318))
+- [x] **Slow-motion background music** — replaces original audio with `sounds/slow_motion.mp3`, auto-loops if the segment is longer than the track, capped to `out_duration` ([backend/render.py:391-468](backend/render.py#L391-L468))
+- [x] **NVENC h264** preset p5, CQ 20 — tuned for RTX 5060 Ti ([backend/render.py:54-62](backend/render.py#L54-L62))
+- [x] **SSE progress stream** real-time per job ([backend/main.py:429-461](backend/main.py#L429-L461))
+- [x] **Job cancel** via `threading.Event` ([backend/main.py:408-414](backend/main.py#L408-L414))
+- [x] **Export single clip** (real-only or real + slow-mo replay) ([backend/main.py:332-365](backend/main.py#L332-L365))
+- [x] **Project CRUD** save/load/list/delete (JSON in `workspace/projects`) ([backend/main.py:256-301](backend/main.py#L256-L301))
+- [x] **List outputs** endpoint `GET /api/outputs` with `size_mb`/`mtime` ([backend/main.py:213-224](backend/main.py#L213-L224)) — ⚠️ not yet wired in the frontend (ready for a Job history view)
+- [x] **Open folder** in File Explorer (Windows/macOS/Linux) ([backend/main.py:188-210](backend/main.py#L188-L210))
+- [x] Path validation against traversal ([backend/main.py:96-111](backend/main.py#L96-L111))
+- [x] Auto-clean `workspace/temp` on startup/shutdown ([backend/main.py:467-475](backend/main.py#L467-L475))
+- [x] **English server messages** — error messages + native dialog title that surface in the UI are all English
 
 ### Frontend
-- [x] Layout 3-cột responsive (Setup · Player+Clips · Render) ([frontend/style.css:56-75](frontend/style.css#L56-L75))
-- [x] **Custom timeline** với buffered/progress/thumb/tooltip ([frontend/index.html:84-92](frontend/index.html#L84-L92)) — đã **bỏ clip markers vàng** ở v1.1 (sai vị trí khi pha đến từ nhiều nguồn khác nhau)
+- [x] Responsive 3-column layout (Setup · Player+Events · Render) ([frontend/style.css:56-75](frontend/style.css#L56-L75))
+- [x] **English UI** — every title, button, placeholder, hint, dynamic status/summary text, and alert/confirm unified to English (v1.2)
+- [x] **Preview output** (v1.3) — "Preview output" toggle plays the assembled highlight in render order: each event's real-speed segment + slow-mo replay (when on), switching the player to each event's source (multi-source aware) and skipping the dead-time between events. Subtle accent transport bar (pulsing dot, ⏮/Play/⏭, "Event N/M · Real|Slow-mo" chip, output-position/total readout, ✕ / Esc exit); intro card excluded (no live source). Pure playback aid — never mutates clips/project; auto-exits on any structural edit ([frontend/app.js:788-1000](frontend/app.js#L788-L1000))
+- [x] **Drag-and-drop event reordering** (v1.3) — each event row has a ⠿ grip in the # column; drag to reorder with a blue insertion-line indicator. Row is draggable only while the grip is held, so inline time inputs / SLO checkbox stay clickable; wired via tbody delegation so it survives re-renders. `reorderClips` moves in one gesture, pushes undo + persists (↑/↓ buttons kept for single-step / keyboard) ([frontend/app.js](frontend/app.js))
+- [x] **Pick source from anywhere on disk** — "Choose source video…" button calls the native dialog first ([frontend/app.js:250](frontend/app.js#L250)), falling back to the in-app browser modal (navigate drives/folders, breadcrumb path bar, shortcuts, Esc/backdrop to close) if unavailable ([frontend/app.js:278-290](frontend/app.js#L278-L290)). Sources are identified by absolute path, displayed by basename; legacy clips/projects with bare names keep working with no migration ([frontend/index.html:61-66](frontend/index.html#L61-L66))
+- [x] **Output resolution picker in Setup card** — dropdown offers only standard tiers (720p / 1K·1080p / 2K·1440p) whose height ≤ the canvas source height (never upscales; >1440p sources cap at 2K). Re-evaluates when the canvas source changes (select video, add/remove/reorder clips, load project); persists to `localStorage` ([frontend/index.html:72-73](frontend/index.html#L72-L73), [frontend/app.js:376-420](frontend/app.js#L376-L420))
+- [x] **Undo for highlight events** — ↩ Undo button + Ctrl+Z snapshots `clips` before each structural change (add/delete/reorder/clear/time-edit) so a mis-deleted event is restored one step at a time (stack capped at 50, cleared on project load, button disabled when empty) ([frontend/app.js:581-598](frontend/app.js#L581-L598), [frontend/index.html:146](frontend/index.html#L146))
+- [x] **Custom timeline** with buffered/progress/thumb/tooltip ([frontend/index.html:84-92](frontend/index.html#L84-L92)) — clip markers removed in v1.1 (wrong positions when events come from different sources)
 - [x] **Custom control bar**: ±5/10/20s, play/pause, speed select (0.25×–2×), highlight toggle ([frontend/index.html:95-127](frontend/index.html#L95-L127))
-- [x] **Setup card** — dropdown video tự refresh khi mở (đã bỏ nút refresh thủ công ở v1.1); section 2 đổi tên "Player & Capture" → **"Player & Mark"** ([frontend/index.html:74](frontend/index.html#L74))
-- [x] **Keyboard shortcuts**: Space, ←/→, Shift+←/→, `,`/`.` (frame-by-frame), I/O (mark in/out), Ctrl+S (save) ([frontend/app.js:825-890](frontend/app.js#L825-L890))
-- [x] **Capture flow** 1 nút toggle (start → end) ([frontend/app.js:306-340](frontend/app.js#L306-L340))
-- [x] **Clip table** edit inline thời gian, ↑/↓ reorder, xoá, preview, export riêng ([frontend/app.js:382-409](frontend/app.js#L382-L409))
-- [x] **Slow-mo per clip** (checkbox SLO) — bỏ chọn = chỉ render real-speed; pha mới mặc định **slow-mo OFF** từ v1.1 ([frontend/app.js:359](frontend/app.js#L359), [405](frontend/app.js#L405))
-- [x] **Project save/load UI** với validate tên, confirm overwrite ([frontend/app.js:570-633](frontend/app.js#L570-L633))
-- [x] **Multi-source UI** — đổi video để thêm pha từ nhiều nguồn; mỗi pha gắn `video` + badge `V1/V2…` cột "Nguồn"; preview tự chuyển player sang đúng nguồn ([frontend/app.js:350-395](frontend/app.js#L350-L395), [457-490](frontend/app.js#L457-L490))
-- [x] **Auto-persist state** vào `localStorage` (tournament, VĐV, slow %, clips kèm nguồn, video đang chọn) + **migration v1→v2** (backfill `video` cho clip cũ) ([frontend/app.js:74-114](frontend/app.js#L74-L114))
-- [x] **SSE listener** + progress bar có shimmer, error state ([frontend/app.js:737-781](frontend/app.js#L737-L781))
-- [x] **Render summary** real-time: tổng pha, slow-mo, intro, output — hiển thị dạng **phút:giây** (`fmtClock`) thay vì giây thô từ v1.1 ([frontend/app.js:519-541](frontend/app.js#L519-L541))
+- [x] **Keyboard shortcuts**: Space, ←/→, Shift+←/→, `,`/`.` (frame-by-frame), I/O (mark in/out), Ctrl+S (save), Ctrl+Z (undo) ([frontend/app.js:825-890](frontend/app.js#L825-L890))
+- [x] **Capture flow** single toggle button (start → end) ([frontend/app.js:306-340](frontend/app.js#L306-L340))
+- [x] **Event table** inline time edit, ↑/↓ reorder, delete, preview, individual export ([frontend/app.js:382-409](frontend/app.js#L382-L409))
+- [x] **Slow-mo per clip** (SLO checkbox) — unchecked = real-speed only; new events default to slow-mo OFF since v1.1 ([frontend/app.js:359](frontend/app.js#L359), [405](frontend/app.js#L405))
+- [x] **Project save/load UI** with name validation, overwrite confirm ([frontend/app.js:570-633](frontend/app.js#L570-L633))
+- [x] **Multi-source UI** — switch videos to add events from several sources; each event carries its `video` + a `V1/V2…` badge in the "Src" column; preview auto-switches the player to the right source ([frontend/app.js:350-395](frontend/app.js#L350-L395), [457-490](frontend/app.js#L457-L490))
+- [x] **Auto-persist state** to `localStorage` (tournament, players, slow %, clips with source, selected video, output height) + **migration v1→v2** (backfill `video` for old clips) ([frontend/app.js:74-136](frontend/app.js#L74-L136))
+- [x] **SSE listener** + progress bar with shimmer, error state ([frontend/app.js:737-781](frontend/app.js#L737-L781))
+- [x] **Render summary** real-time: total events, slow-mo, intro, output — shown as **mm:ss** (`fmtClock`) ([frontend/app.js:519-541](frontend/app.js#L519-L541))
 
 ### DevOps / Launcher
-- [x] `start.bat` 1-click: auto tạo venv, cài deps, kiểm tra ffmpeg, free port :8770, mở browser ([start.bat:1-127](start.bat#L1-L127))
-- [x] Auto-restart loop (tối đa 50 lần) + clear cache giữa các lần restart ([start.bat:89-120](start.bat#L89-L120))
+- [x] `start.bat` 1-click: auto-create venv, install deps, check ffmpeg, free port :8770, open browser ([start.bat:1-127](start.bat#L1-L127))
+- [x] Auto-restart loop (max 50) + clear cache between restarts ([start.bat:89-120](start.bat#L89-L120))
 
 ---
 
-## 3. Đang trống / Có thể cải thiện
+## 3. Missing / possible improvements
 
-### Chưa có
-- [ ] **`start` shell script** cho Linux/macOS — file `start` rỗng (chỉ có `start.bat`)
-- [ ] **README / hướng dẫn cài đặt** — chưa có README chính thức
-- [ ] **Test** — chưa có unit/integration test
-- [ ] **Job history** — sau khi đóng tab là mất, không xem được job cũ
-- [ ] **Hậu xử lý audio**: chưa có normalize loudness / fade in-out giữa các segment
-- [ ] **Subtitle / overlay tên VĐV** trên từng pha
-- [x] ~~**Multi-video timeline**~~ — ĐÃ XONG 2026-05-29: ghép pha từ nhiều video nguồn vào 1 output
+### Missing
+- [ ] **`start` shell script** for Linux/macOS — the `start` file is empty (only `start.bat` exists)
+- [ ] **README / install guide** — no official README yet
+- [ ] **Tests** — no unit/integration tests
+- [ ] **Job history** — closing the tab loses everything; old jobs aren't viewable (`GET /api/outputs` exists, not wired)
+- [ ] **Audio post-processing** — no loudness normalize / fade in-out between segments
+- [ ] **Subtitle / player-name overlay** per event
+- [x] ~~**Multi-video timeline**~~ — DONE 2026-05-29: stitch events from several sources into one output
+- [x] ~~**Selectable output resolution**~~ — DONE 2026-06-15: 720p–2K picker, never upscales
+- [x] ~~**Pick source from anywhere on disk**~~ — DONE 2026-06-15: native dialog + in-app browser fallback
+- [x] ~~**Undo for accidental edits**~~ — DONE 2026-06-15: ↩ Undo + Ctrl+Z
 
-### Cải thiện đề xuất
-- [ ] **Backend**: `_atempo_chain` có thể bị infinite loop với ratio quá nhỏ (đã clamp 0.05, ổn) — nên thêm test
-- [ ] **Backend**: `concat_segments` đang xoá file `concat_*.txt` cũ vô điều kiện trong cleanup — có thể đụng job khác đang chạy cùng lúc
-- [x] ~~**Frontend**: `localStorage` không version migration~~ — ĐÃ XONG: thêm `version` + backfill `video`
-- [ ] **Frontend**: chưa có toast/notification component — đang reuse `captureStatus` làm chỗ flash message
-- [ ] **Frontend**: `previewClip` watchdog dùng `timeupdate` (~250ms) — có thể trượt cuối clip ~0.2s
-- [ ] **Resolution lock**: hiện đang cap fps ≤ 60 nhưng không cap resolution — video 4K sẽ render rất nặng
-- [ ] **Cache-bust**: dùng mtime int (giây) — sửa file 2 lần trong 1 giây sẽ không invalidate
+### Suggested improvements
+- [ ] **Backend**: `_atempo_chain` could infinite-loop on a tiny ratio (clamped at 0.05, stable) — add a test
+- [ ] **Backend**: `concat_segments` deletes old `concat_*.txt` unconditionally in cleanup — could collide with a concurrent job
+- [x] ~~**Frontend**: `localStorage` has no version migration~~ — DONE: added `version` + backfill `video`
+- [ ] **Frontend**: no toast/notification component — reusing `captureStatus` as a flash-message slot
+- [ ] **Frontend**: `previewClip` watchdog uses `timeupdate` (~250ms) — may overshoot the clip end by ~0.2s
+- [ ] **Cache-bust**: uses integer mtime (seconds) — editing a file twice within one second won't invalidate
 
 ---
 
-## 4. Mốc kỹ thuật quan trọng
+## 4. Key technical decisions
 
-| Hạng mục | Quyết định | Ghi chú |
+| Item | Decision | Notes |
 |---|---|---|
-| Encoder | `h264_nvenc -preset p5 -cq 20` | Tune `hq`, VBR — chất lượng cao + nhanh trên RTX Ada/Blackwell |
-| Decoder | `-hwaccel cuda` (real) / mặc định (slow) | Slow-mo bỏ hwaccel_output_format vì `setpts` là CPU filter |
-| Concat | Demuxer + `-c copy` | Mọi segment normalize cùng codec/resolution/fps để stitch instant |
-| Audio | AAC 48kHz stereo 192k | Đồng nhất cho mọi segment; intro có anullsrc nếu video gốc có audio |
-| Slow audio | Music override (loop `sounds/slow_motion.mp3`) → fallback atempo | Audio gốc bị drop khi có nhạc; atempo chỉ nhận 0.5–2.0 mỗi filter |
-| Progress | Parse `out_time_us=` từ `-progress pipe:1` | Mỗi segment có weight riêng → progress monotonic toàn job |
-| Port | `:8770` | Tránh đụng video_studio (`:8765`) |
+| Encoder | `h264_nvenc -preset p5 -cq 20` | Tuned `hq`, VBR — high quality + fast on RTX Ada/Blackwell |
+| Decoder | `-hwaccel cuda` (real) / default (slow) | Slow-mo drops hwaccel_output_format because `setpts` is a CPU filter |
+| Concat | Demuxer + `-c copy` | Every segment normalized to the same codec/resolution/fps for instant stitch |
+| Output res | `out_height` downscale (0 = native) | Standard tiers only, never upscales; >1440p caps at 2K |
+| Source path | `_safe_source_path` resolves any absolute path | Local-only app; bare filenames still resolve under `workspace/raw` |
+| Audio | AAC 48kHz stereo 192k | Uniform across segments; intro gets anullsrc if source has audio |
+| Slow audio | Music override (loop `sounds/slow_motion.mp3`) → fallback atempo | Original audio dropped when music is present; atempo only takes 0.5–2.0 per filter |
+| Progress | Parse `out_time_us=` from `-progress pipe:1` | Per-segment weight → monotonic progress across the whole job |
+| Port | `:8770` | Avoids clashing with video_studio (`:8765`) |
 
 ---
 
-## 5. Cách chạy
+## 5. How to run
 
 ```bat
-:: Lần đầu — auto setup venv + cài deps
+:: First run — auto-sets up venv + installs deps
 start.bat
 
-:: Yêu cầu
+:: Requirements
 :: - Python 3.10+
-:: - FFmpeg trên PATH (winget install Gyan.FFmpeg)
-:: - NVIDIA GPU có NVENC (khuyến nghị RTX)
+:: - FFmpeg on PATH (winget install Gyan.FFmpeg)
+:: - NVIDIA GPU with NVENC (RTX recommended)
 ```
 
-Bỏ video vào `workspace/raw/`, mở http://127.0.0.1:8770, mark in/out (phím **I**/**O**), bấm **Xuất video highlight**.
+Open http://127.0.0.1:8770, click **Choose source video…** to pick footage from any drive/folder, mark in/out (keys **I**/**O**), then click **Export highlight video**.
 
 ---
 
-## 6. Next steps đề xuất
+## 6. Suggested next steps
 
-1. **Viết README.md** với screenshot + GIF demo workflow
-2. **Tạo `start` shell script** cho người dùng Linux/macOS (nếu cần cross-platform)
-3. **Thêm `pytest`** test cho `render._atempo_chain`, `render._expected_total_duration`, project path validation
-4. **Thumbnail cho clip table** — sinh JPEG nhỏ ở frame giữa của mỗi pha
-5. **Overlay tên VĐV** trên slow-mo segment (Player 1 / Player 2) — tận dụng `drawtext` như badge SLOW MOTION
+1. **Write README.md** with screenshots + a workflow demo GIF
+2. **Create a `start` shell script** for Linux/macOS users (if cross-platform is needed)
+3. **Add `pytest`** tests for `render._atempo_chain`, `render._expected_total_duration`, source/project path validation
+4. **Thumbnail in the event table** — generate a small JPEG at each event's middle frame
+5. **Player-name overlay** on slow-mo segments (Player 1 / Player 2) — reuse `drawtext` like the SLOW MOTION badge
+6. **Job history view** — wire `GET /api/outputs` into the UI so past renders are listed
