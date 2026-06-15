@@ -99,6 +99,28 @@ class Clip:
 
 
 @dataclass
+class TextOverlay:
+    """A text label burned onto the FINAL video via drawtext.
+
+    Position is the text CENTRE as a fraction of the canvas (0..1), so it
+    stays put regardless of output resolution. size_pct is the font size as
+    a percentage of canvas height (also resolution-independent). start/end are
+    seconds on the final timeline (including the intro); None = whole video.
+    """
+    text: str
+    font: str = "arial"           # family key into FONT_FAMILIES
+    bold: bool = False
+    italic: bool = False
+    size_pct: float = 6.0
+    color: str = "#ffffff"
+    x: float = 0.5
+    y: float = 0.85
+    start: Optional[float] = None
+    end: Optional[float] = None
+    shadow: bool = True           # black outline for legibility
+
+
+@dataclass
 class RenderJob:
     job_id: str
     video_path: Path           # fallback source for clips without their own video_path
@@ -117,6 +139,9 @@ class RenderJob:
     # When 0 < out_height < source height, the canvas is downscaled to this
     # height (aspect preserved). Never upscales. Frontend caps choices at 1440.
     out_height: int = 0
+
+    # Text overlays burned onto the final video (empty = none).
+    texts: List[TextOverlay] = field(default_factory=list)
 
     # progress state
     status: str = "pending"     # pending | running | done | error
@@ -191,6 +216,126 @@ def _find_font() -> Optional[str]:
         if Path(c).is_file():
             return c
     return None
+
+
+# Curated font families offered in the UI. Each maps style -> Windows font
+# file. Bold/Italic pick the matching variant, falling back to regular when a
+# family lacks it (e.g. Impact has no bold/italic).
+FONTS_DIR = "C:/Windows/Fonts/"
+FONT_FAMILIES: Dict[str, Dict[str, str]] = {
+    "arial":    {"regular": "arial.ttf",   "bold": "arialbd.ttf", "italic": "ariali.ttf",   "bolditalic": "arialbi.ttf"},
+    "segoe":    {"regular": "segoeui.ttf", "bold": "segoeuib.ttf", "italic": "segoeuii.ttf", "bolditalic": "segoeuiz.ttf"},
+    "times":    {"regular": "times.ttf",   "bold": "timesbd.ttf", "italic": "timesi.ttf",   "bolditalic": "timesbi.ttf"},
+    "consolas": {"regular": "consola.ttf", "bold": "consolab.ttf", "italic": "consolai.ttf", "bolditalic": "consolaz.ttf"},
+    "impact":   {"regular": "impact.ttf"},
+}
+
+# Back-compat for older saved keys before the family+B/I split.
+_LEGACY_FONT_KEYS = {
+    "arial-bold": ("arial", True, False),
+    "segoe-bold": ("segoe", True, False),
+}
+
+
+def _resolve_font_file(family: str, bold: bool = False, italic: bool = False) -> Optional[str]:
+    family = family or "arial"
+    if family in _LEGACY_FONT_KEYS:
+        family, bold, _ = _LEGACY_FONT_KEYS[family]
+    fam = FONT_FAMILIES.get(family)
+    if not fam:
+        return _find_font()
+    if bold and italic:
+        variant = "bolditalic"
+    elif bold:
+        variant = "bold"
+    elif italic:
+        variant = "italic"
+    else:
+        variant = "regular"
+    for v in (variant, "regular"):       # fall back to regular if variant missing
+        name = fam.get(v)
+        if name and Path(FONTS_DIR + name).is_file():
+            return FONTS_DIR + name
+    return _find_font()
+
+
+def _esc_ff_path(p: str) -> str:
+    """Escape a path for use inside a single-quoted ffmpeg filter option:
+    forward slashes work on Windows; the drive-letter colon must be escaped."""
+    return p.replace("\\", "/").replace(":", r"\:")
+
+
+def _ff_color(value: str) -> str:
+    """Convert a '#RRGGBB' hex (or bare 'RRGGBB') to ffmpeg's '0xRRGGBB'.
+    Unknown values fall back to white."""
+    s = (value or "").strip().lstrip("#")
+    if re.fullmatch(r"[0-9a-fA-F]{6}", s):
+        return f"0x{s.lower()}"
+    return "white"
+
+
+def _clip01(v: float) -> float:
+    try:
+        return max(0.0, min(1.0, float(v)))
+    except (TypeError, ValueError):
+        return 0.5
+
+
+def _enable_expr(start: Optional[float], end: Optional[float],
+                 offset: float = 0.0) -> str:
+    """drawtext `enable` expression for an optional time window. start/end are
+    OUTPUT-relative seconds (the preview timeline, intro excluded); `offset`
+    (= intro duration) shifts them onto the final timeline, whose t starts with
+    the intro. None = open-ended; both None = always on."""
+    s = (start + offset) if start is not None else None
+    e = (end + offset) if end is not None else None
+    if s is not None and e is not None and e > s:
+        return f"between(t,{s:.3f},{e:.3f})"
+    if s is not None:
+        return f"gte(t,{s:.3f})"
+    if e is not None:
+        return f"lte(t,{e:.3f})"
+    return ""
+
+
+def _build_text_filters(
+    texts: List[TextOverlay], width: int, height: int, job_id: str,
+    intro_offset: float = 0.0,
+) -> tuple[str, List[Path]]:
+    """Build a comma-joined drawtext chain for the text overlays, plus the list
+    of temp text files written (caller cleans them up; run_job's glob covers
+    `{job_id}_*`). The text content is written to a UTF-8 file and referenced
+    via `textfile=` so we never have to escape arbitrary user text (incl.
+    Vietnamese diacritics) inside the filtergraph."""
+    parts: List[str] = []
+    files: List[Path] = []
+    for i, t in enumerate(texts or []):
+        content = (t.text or "").strip()
+        if not content:
+            continue
+        font_file = _resolve_font_file(t.font, bool(t.bold), bool(t.italic))
+        if not font_file:
+            continue
+        txt_path = TEMP_DIR / f"{job_id}_text_{i}.txt"
+        txt_path.write_text(content, encoding="utf-8")
+        files.append(txt_path)
+
+        fontsize = max(8, round((float(t.size_pct) / 100.0) * height))
+        dt = (
+            f"drawtext=fontfile='{_esc_ff_path(font_file)}'"
+            f":textfile='{_esc_ff_path(str(txt_path))}'"
+            f":fontsize={fontsize}"
+            f":fontcolor={_ff_color(t.color)}"
+            f":x=w*{_clip01(t.x):.5f}-text_w/2"
+            f":y=h*{_clip01(t.y):.5f}-text_h/2"
+        )
+        if t.shadow:
+            dt += ":borderw=2:bordercolor=black@0.6"
+        en = _enable_expr(t.start, t.end, intro_offset)
+        if en:
+            dt += f":enable='{en}'"
+        parts.append(dt)
+    return ",".join(parts), files
 
 
 def _make_intro_png(out_png: Path, width: int, height: int,
@@ -550,6 +695,33 @@ def concat_segments(segments: List[Path], out_path: Path,
     _run_ffmpeg(args, expected_duration, on_progress, cancel)
 
 
+def concat_with_text(segments: List[Path], out_path: Path, text_vf: str,
+                     need_audio: bool, expected_duration: float,
+                     on_progress: Callable[[float], None],
+                     cancel: threading.Event) -> None:
+    """Concat the segments AND burn text overlays in a single re-encode pass.
+    Used instead of concat_segments when the job has text overlays — the
+    drawtext `t` is then the final-timeline timestamp (starting at the intro).
+    Video is re-encoded (NVENC); audio is copied (segments share AAC params)."""
+    list_file = TEMP_DIR / f"concat_{uuid.uuid4().hex}.txt"
+    with list_file.open("w", encoding="utf-8") as f:
+        for seg in segments:
+            posix = str(seg).replace("\\", "/")
+            f.write(f"file '{posix}'\n")
+
+    args = [
+        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+        "-progress", "pipe:1", "-nostats",
+        "-f", "concat", "-safe", "0",
+        "-i", str(list_file),
+        "-vf", text_vf,
+        *NVENC_ARGS,
+    ]
+    args += ["-c:a", "copy"] if need_audio else ["-an"]
+    args += ["-movflags", "+faststart", str(out_path)]
+    _run_ffmpeg(args, expected_duration, on_progress, cancel)
+
+
 # --------------------------------------------------------------------------
 # Top-level job runner
 # --------------------------------------------------------------------------
@@ -609,12 +781,19 @@ def run_job(job: RenderJob) -> None:
             sp = clip.video_path or job.video_path
             return bool(source_info.get(sp, {}).get("has_audio", False))
 
+        # Text overlays: build the drawtext chain once (canvas dims are known).
+        # When present, the final step re-encodes (concat + drawtext) instead of
+        # a `-c copy` concat, so weight it heavier for smooth progress.
+        text_vf, _text_files = _build_text_filters(
+            job.texts, width, height, job.job_id, intro_offset=job.intro_seconds)
+
         # Plan the work: per-segment weights so progress is monotonic.
         intro_weight = job.intro_seconds
         factor = 1.0 / max(0.05, job.slow_ratio)
         real_weights = [c.duration for c in job.clips]
         slow_weights = [c.duration * factor if c.slowmo else 0.0 for c in job.clips]
-        concat_weight = sum([intro_weight] + real_weights + slow_weights) * 0.05  # quick (-c copy)
+        segs_total = sum([intro_weight] + real_weights + slow_weights)
+        concat_weight = segs_total * (0.6 if text_vf else 0.05)  # re-encode vs -c copy
 
         total = intro_weight + sum(real_weights) + sum(slow_weights) + concat_weight
         if total <= 0:
@@ -671,7 +850,16 @@ def run_job(job: RenderJob) -> None:
         out_name = f"{safe_name}_{ts}.mp4"
         out_path = OUT_DIR / out_name
 
-        if len(segments) == 1:
+        if text_vf:
+            # Text overlays present: re-encode (concat + drawtext) in one pass.
+            # Works for a single segment too (concat of one file is fine).
+            job.stage = "text"
+            job.message = "Adding text overlays..."
+            concat_with_text(segments, out_path, text_vf, need_audio,
+                             _expected_total_duration(job),
+                             stage_progress(concat_weight),
+                             job.cancel)
+        elif len(segments) == 1:
             # Single-segment export (e.g. real-only single clip with no intro):
             # rename instead of running concat.
             job.stage = "finalising"

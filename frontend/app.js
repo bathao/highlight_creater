@@ -49,6 +49,14 @@ const els = {
   clearClips: $("clearClips"),
   undoClipBtn: $("undoClipBtn"),
 
+  // Text overlays
+  textOverlayLayer: $("textOverlayLayer"),
+  textPanel: $("textPanel"),
+  textTimeline: $("textTimeline"),
+  textList: $("textList"),
+  textCount: $("textCount"),
+  addTextBtn: $("addTextBtn"),
+
   // Project save/load
   projectName: $("projectName"),
   projectSelect: $("projectSelect"),
@@ -97,6 +105,29 @@ let outHeight = 0;        // target output height (px); 0 = native source height
 let lastBrowseDir = "";  // last folder opened in the file browser (persisted)
 const probeCache = {};   // video path -> probe info {width,height,fps,...}
 
+// Text overlays burned onto the final video. Each: {id,text,font,sizePct,
+// color,x,y,start,end,shadow}. x/y are the text CENTRE as a fraction of the
+// final canvas; start/end are seconds on the final timeline (incl. intro),
+// null = whole video.
+let texts = [];
+let nextTextId = 1;
+let selectedTextId = null;
+
+// Curated font families — keys match backend FONT_FAMILIES. `noStyle` marks
+// families without bold/italic variants (Impact) so those toggles disable.
+const FONT_OPTIONS = [
+  { key: "arial",    label: "Arial",           css: "Arial, sans-serif" },
+  { key: "segoe",    label: "Segoe UI",        css: "'Segoe UI', sans-serif" },
+  { key: "impact",   label: "Impact",          css: "Impact, sans-serif", noStyle: true },
+  { key: "times",    label: "Times New Roman", css: "'Times New Roman', serif" },
+  { key: "consolas", label: "Consolas",        css: "Consolas, monospace" },
+];
+// Map legacy stored keys (pre family+B/I split) -> {key, bold}.
+const LEGACY_FONT = { "arial-bold": { key: "arial", bold: true }, "segoe-bold": { key: "segoe", bold: true } };
+function fontSpec(key) {
+  return FONT_OPTIONS.find(f => f.key === key) || FONT_OPTIONS[0];
+}
+
 // Filename (tail) of an absolute path or bare name; used for compact display.
 function baseName(p) {
   if (!p) return "";
@@ -130,6 +161,7 @@ function saveState() {
       lastBrowseDir,
       currentVideo,
       clips,
+      texts,
     }));
   } catch (e) { /* ignore */ }
 }
@@ -155,7 +187,40 @@ function loadState() {
       }));
       nextClipId = Math.max(0, ...clips.map(c => c.id || 0)) + 1;
     }
+    if (Array.isArray(s.texts)) {
+      texts = s.texts.map(normalizeText);
+      nextTextId = Math.max(0, ...texts.map(t => t.id || 0)) + 1;
+    }
   } catch (e) { /* ignore */ }
+}
+
+// Coerce a stored/loaded overlay into the canonical shape with safe defaults.
+function normalizeText(t) {
+  t = t || {};
+  // Migrate legacy font keys (e.g. "arial-bold") -> family + bold flag.
+  let font = t.font, bold = !!t.bold;
+  if (LEGACY_FONT[font]) { bold = LEGACY_FONT[font].bold || bold; font = LEGACY_FONT[font].key; }
+  font = fontSpec(font).key;
+  const noStyle = !!fontSpec(font).noStyle;
+  return {
+    id: t.id || nextTextId++,
+    text: typeof t.text === "string" ? t.text : "",
+    font,
+    bold: noStyle ? false : bold,
+    italic: noStyle ? false : !!t.italic,
+    sizePct: clampNum(t.sizePct, 1, 30, 6),
+    color: /^#[0-9a-fA-F]{6}$/.test(t.color || "") ? t.color : "#ffcc00",
+    x: clampNum(t.x, 0, 1, 0.5),
+    y: clampNum(t.y, 0, 1, 0.85),
+    start: (typeof t.start === "number" && isFinite(t.start)) ? t.start : null,
+    end: (typeof t.end === "number" && isFinite(t.end)) ? t.end : null,
+    shadow: t.shadow !== false,
+  };
+}
+function clampNum(v, lo, hi, dflt) {
+  const n = parseFloat(v);
+  if (!isFinite(n)) return dflt;
+  return Math.max(lo, Math.min(hi, n));
 }
 
 // ---- Helpers --------------------------------------------------------
@@ -226,6 +291,7 @@ async function selectVideo(path) {
     els.playerInfo.textContent = "No video selected";
     updatePickLabel();
     refreshResolutionOptions();
+    renderTextOverlays();
     return;
   }
   currentVideo = path;
@@ -234,6 +300,7 @@ async function selectVideo(path) {
   els.player.load();
   els.overlay.classList.add("hidden");
   updatePickLabel();
+  renderTextOverlays();
   // Probe for fps / resolution
   const info = await probeVideo(path);
   if (info) {
@@ -475,9 +542,9 @@ els.player.addEventListener("durationchange", () => {
   updatePlayerTime();
 });
 els.player.addEventListener("progress", updateBuffered);
-els.player.addEventListener("play",  () => { updatePlayBtn(); pvSyncPlayBtn(); });
-els.player.addEventListener("pause", () => { updatePlayBtn(); pvSyncPlayBtn(); });
-els.player.addEventListener("ended", () => { updatePlayBtn(); pvSyncPlayBtn(); });
+els.player.addEventListener("play",  () => { updatePlayBtn(); pvSyncPlayBtn(); syncTextOverlayTiming(); });
+els.player.addEventListener("pause", () => { updatePlayBtn(); pvSyncPlayBtn(); syncTextOverlayTiming(); });
+els.player.addEventListener("ended", () => { updatePlayBtn(); pvSyncPlayBtn(); syncTextOverlayTiming(); });
 
 // ---- Custom control bar ---------------------------------------------
 els.playBtn.addEventListener("click", () => {
@@ -931,8 +998,10 @@ function pvEnter() {
   pvPlan = buildPvPlan();
   pvMode = true;
   els.previewBar.classList.remove("hidden");
+  els.textPanel.classList.remove("hidden");   // text editor lives in the preview context
   els.previewOutputBtn.classList.add("active");
   els.previewOutputBtn.textContent = "■ Stop preview";
+  renderTextList();                            // (re)draw editor + overlays now visible
   const intro = parseFloat(els.introSeconds.value || "0");
   flashTopMessage(`Preview output — ${pvPlan.length} segment(s)${intro ? `, intro ${intro}s not shown` : ""}`);
   pvStartSegment(0, true);
@@ -946,18 +1015,21 @@ function pvExit() {
   els.player.pause();
   els.player.playbackRate = parseFloat(els.speedSelect.value) || 1;
   els.previewBar.classList.add("hidden");
+  els.textPanel.classList.add("hidden");
   els.previewOutputBtn.classList.remove("active");
   els.previewOutputBtn.textContent = "▶ Preview output";
+  renderTextOverlays();   // pvMode now false -> clears the overlay layer
 }
 
-function pvStartSegment(i, autoplay) {
+function pvStartSegment(i, autoplay, startAt) {
   if (i < 0 || i >= pvPlan.length) { pvFinish(); return; }
   pvPos = i;
   pvClearWatch();
   const seg = pvPlan[i];
+  const at = (typeof startAt === "number") ? startAt : seg.start;
   const begin = () => {
     pvSwitching = false;
-    els.player.currentTime = seg.start;
+    els.player.currentTime = at;
     els.player.playbackRate = seg.rate;
     if (autoplay) els.player.play().catch(() => {});
     pvAttachWatch(seg);
@@ -1009,6 +1081,42 @@ function pvFinish() {
 function pvPrev() { if (pvMode) pvStartSegment(Math.max(0, pvPos - 1), true); }
 function pvNext() { if (pvMode && pvPos + 1 < pvPlan.length) pvStartSegment(pvPos + 1, true); }
 
+// Current position on the output timeline (seconds, excludes intro).
+function pvOutputPos() {
+  const seg = pvPlan[pvPos];
+  if (!seg) return 0;
+  const ct = els.player.currentTime || 0;
+  const within = Math.max(0, Math.min(seg.srcDur, ct - seg.start)) * (seg.outDur / (seg.srcDur || 1));
+  return seg.outStart + within;
+}
+
+// Index of the segment that contains output time T.
+function pvSegAt(T) {
+  for (let i = 0; i < pvPlan.length; i++) {
+    if (T < pvPlan[i].outStart + pvPlan[i].outDur) return i;
+  }
+  return pvPlan.length - 1;
+}
+
+// Seek to an absolute OUTPUT-timeline position T (seconds, intro excluded).
+// Crosses segments/sources and skips dead-time. Stays inside [0, pvTotal].
+function pvSeekToOutput(T) {
+  if (!pvMode || !pvPlan.length) return;
+  T = Math.max(0, Math.min(pvTotal, T));
+  const j = pvSegAt(T);
+  const seg = pvPlan[j];
+  const withinOut = T - seg.outStart;
+  const srcTime = seg.start + withinOut * (seg.srcDur / (seg.outDur || 1));
+  const wasPlaying = !els.player.paused;
+  if (j === pvPos && seg.video === currentVideo) {
+    els.player.currentTime = srcTime;
+    pvUpdateBar();
+  } else {
+    pvStartSegment(j, wasPlaying, srcTime);
+  }
+}
+function pvSeekOutput(delta) { pvSeekToOutput(pvOutputPos() + delta); }
+
 function pvUpdateBar() {
   if (!pvMode || !pvPlan.length) return;
   const seg = pvPlan[pvPos];
@@ -1019,11 +1127,365 @@ function pvUpdateBar() {
   els.pvTime.textContent = `${fmt(seg.outStart + within)} / ${fmt(pvTotal)}`;
   els.pvPrev.disabled = pvPos === 0;
   els.pvNext.disabled = pvPos + 1 >= pvPlan.length;
+  syncTextOverlayTiming();
 }
 
 function pvSyncPlayBtn() {
   els.pvPlay.textContent = els.player.paused ? "▶" : "❚❚";
 }
+
+// ---- Text overlays --------------------------------------------------
+// Editor list (CRUD) + a live, draggable WYSIWYG layer over the player.
+// Pure render-time aid: stored in state/project, sent to /api/render, never
+// touches the clip data. Positions are fractions of the player box (= the
+// final 16:9 canvas for the common case).
+
+function renderTextList() {
+  const n = texts.length;
+  els.textCount.textContent = n;
+  if (!n) {
+    els.textList.innerHTML = `<div class="text-empty">No text yet. Click <b>＋ Add text</b> to overlay a label on the final video.</div>`;
+    renderTextOverlays();
+    refreshRenderSummary();
+    return;
+  }
+  const fontOpts = (sel) => FONT_OPTIONS
+    .map(f => `<option value="${f.key}" ${f.key === sel ? "selected" : ""}>${f.label}</option>`)
+    .join("");
+  els.textList.innerHTML = "";
+  texts.forEach((t) => {
+    const noStyle = !!fontSpec(t.font).noStyle;
+    const dis = noStyle ? "disabled" : "";
+    const row = document.createElement("div");
+    row.className = "text-row" + (t.id === selectedTextId ? " selected" : "");
+    row.dataset.id = t.id;
+    row.innerHTML = `
+      <input class="tx-content" data-field="text" type="text" placeholder="Text…" value="${escapeAttr(t.text)}" />
+      <select class="tx-font" data-field="font" title="Font">${fontOpts(t.font)}</select>
+      <button class="tx-style ${t.bold ? "active" : ""}" data-act="bold" ${dis} title="Bold">B</button>
+      <button class="tx-style ${t.italic ? "active" : ""}" data-act="italic" ${dis} title="Italic">I</button>
+      <label class="tx-field">Size
+        <input class="tx-size" data-field="sizePct" type="number" min="1" max="30" step="0.5" value="${t.sizePct}" title="Font size (% of frame height)" />
+      </label>
+      <input class="tx-color" data-field="color" type="color" value="${t.color}" title="Text color" />
+      <span class="tx-window" title="Time window — set it on the timeline above">${windowLabel(t)}</span>
+      <span class="tx-spacer"></span>
+      <button class="tx-locate" data-act="locate" title="Find on timeline / player">⌖</button>
+      <button class="tx-del" data-act="del" title="Delete">✕</button>
+    `;
+    els.textList.appendChild(row);
+  });
+  renderTextOverlays();
+  renderTextTimeline();
+  refreshRenderSummary();
+}
+
+// Compact "0:03 – 0:08" / "whole video" label for a text's time window.
+function windowLabel(t) {
+  if (t.start == null && t.end == null) return "∞ whole video";
+  return `${t.start != null ? fmt(t.start) : "start"} – ${t.end != null ? fmt(t.end) : "end"}`;
+}
+
+function escapeAttr(s) {
+  return String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
+}
+
+// (Re)build the draggable labels over the player. Font size is px relative to
+// the player box height so it matches what the % size will render to.
+function renderTextOverlays() {
+  const layer = els.textOverlayLayer;
+  if (!layer) return;
+  layer.innerHTML = "";
+  // Overlays live only in the Preview-output context (text editor is open then).
+  if (!pvMode || !els.player.src) return;
+  const boxH = layer.clientHeight || 1;
+  texts.forEach((t) => {
+    if (!(t.text || "").trim()) return;
+    const fs = fontSpec(t.font);
+    const el = document.createElement("div");
+    el.className = "tx-overlay" + (t.id === selectedTextId ? " selected" : "");
+    el.dataset.id = t.id;
+    el.textContent = t.text;
+    el.style.left = `${t.x * 100}%`;
+    el.style.top = `${t.y * 100}%`;
+    el.style.fontFamily = fs.css;
+    el.style.fontWeight = t.bold ? 700 : 400;
+    el.style.fontStyle = t.italic ? "italic" : "normal";
+    el.style.color = t.color;
+    el.style.fontSize = `${(t.sizePct / 100) * boxH}px`;
+    el.style.textShadow = t.shadow
+      ? "0 0 2px #000, 1px 1px 2px #000, -1px -1px 2px #000" : "none";
+    layer.appendChild(el);
+  });
+  syncTextOverlayTiming();
+}
+
+// While the preview is PLAYING, show only overlays whose time window covers the
+// current OUTPUT position (verify timing). While PAUSED (or not in preview),
+// show them all so any label can be dragged/positioned. Times are output-
+// relative (same scale as the timeline + pv-time readout); the backend adds
+// the intro offset at render. Also moves the timeline playhead.
+function syncTextOverlayTiming() {
+  let pos = null;
+  if (pvMode && pvPlan.length && !els.player.paused) {
+    pos = pvOutputPos();
+  }
+  els.textOverlayLayer.querySelectorAll(".tx-overlay").forEach((node) => {
+    const t = texts.find(x => String(x.id) === node.dataset.id);
+    if (!t) return;
+    let visible = true;
+    if (pos !== null) {
+      const s = t.start != null ? t.start : 0;
+      const e = t.end != null ? t.end : Infinity;
+      visible = pos >= s && pos <= e;
+    }
+    node.style.display = visible ? "" : "none";
+  });
+  updateTimelinePlayhead();
+}
+
+// Move the timeline playhead to the current output position.
+function updateTimelinePlayhead() {
+  const ph = els.textTimeline.querySelector(".txtl-playhead");
+  if (!ph || !pvMode || !pvPlan.length || pvTotal <= 0) return;
+  ph.style.left = `${(pvOutputPos() / pvTotal) * 100}%`;
+}
+
+function addText() {
+  const t = normalizeText({
+    id: nextTextId++, text: "Text", font: "arial", bold: true, italic: false,
+    sizePct: 7, color: "#ffcc00", x: 0.5, y: 0.85, start: null, end: null, shadow: true,
+  });
+  texts.push(t);
+  selectedTextId = t.id;
+  renderTextList();
+  saveState();
+  // Focus the new row's text input for immediate typing.
+  const row = els.textList.querySelector(`.text-row[data-id="${t.id}"] .tx-content`);
+  if (row) { row.focus(); row.select(); }
+}
+
+function removeText(id) {
+  texts = texts.filter(t => t.id !== id);
+  if (selectedTextId === id) selectedTextId = null;
+  renderTextList();
+  saveState();
+}
+
+// ---- CapCut-style output timeline -----------------------------------
+// A base "video track" (the kept segments) + one lane per text whose bar is
+// its [start,end] window on the output timeline. Drag a bar to move, drag its
+// edges to trim, click to select. Dragging a bar to span the full width snaps
+// it to "whole video" (null window).
+const roundT = (x) => Math.round(x * 100) / 100;
+
+function txtlBarRect(t) {
+  const s = Math.max(0, Math.min(pvTotal, t.start != null ? t.start : 0));
+  const e = Math.max(0, Math.min(pvTotal, t.end != null ? t.end : pvTotal));
+  return { left: (s / pvTotal) * 100, width: (Math.max(0, e - s) / pvTotal) * 100 };
+}
+
+function renderTextTimeline() {
+  const tl = els.textTimeline;
+  if (!tl) return;
+  if (!pvMode || !pvPlan.length || pvTotal <= 0) { tl.innerHTML = ""; return; }
+  const segs = pvPlan.map((s) => {
+    const left = (s.outStart / pvTotal) * 100, w = (s.outDur / pvTotal) * 100;
+    return `<div class="seg ${s.kind}" style="left:${left}%;width:${w}%" title="Event ${s.clipIdx + 1} ${s.kind}">E${s.clipIdx + 1}${s.kind === "slow" ? " ⏱" : ""}</div>`;
+  }).join("");
+  const lanes = texts.map((t) => {
+    const r = txtlBarRect(t);
+    const whole = (t.start == null && t.end == null);
+    const sel = t.id === selectedTextId ? " selected" : "";
+    const label = escapeAttr((t.text || "Text").slice(0, 28) || "Text");
+    return `
+      <div class="txtl-lane">
+        <div class="txtl-bar${sel}${whole ? " whole" : ""}" data-id="${t.id}" style="left:${r.left}%;width:${r.width}%" title="${label}">
+          <span class="txtl-h l" data-h="start"></span>
+          <span class="txtl-label">${label}</span>
+          <span class="txtl-h r" data-h="end"></span>
+        </div>
+      </div>`;
+  }).join("");
+  tl.innerHTML = `
+    <div class="txtl-ruler"><span>0:00</span><span>${fmt(pvTotal / 2)}</span><span>${fmt(pvTotal)}</span></div>
+    <div class="txtl-body">
+      <div class="txtl-track">${segs}</div>
+      ${lanes}
+      <div class="txtl-playhead"></div>
+    </div>`;
+  updateTimelinePlayhead();
+}
+
+// Toggle selection classes without rebuilding the timeline DOM (keeps drags alive).
+function selectText(id) {
+  selectedTextId = id;
+  els.textList.querySelectorAll(".text-row").forEach(r =>
+    r.classList.toggle("selected", parseInt(r.dataset.id, 10) === id));
+  els.textTimeline.querySelectorAll(".txtl-bar").forEach(b =>
+    b.classList.toggle("selected", parseInt(b.dataset.id, 10) === id));
+  renderTextOverlays();
+}
+
+let tlDrag = null;  // {mode:'seek'|'move'|'start'|'end', id, bar, rect, startX, origStart, origEnd}
+
+function tlBodyRect() {
+  const body = els.textTimeline.querySelector(".txtl-body");
+  return body ? body.getBoundingClientRect() : null;
+}
+function tlTimeFromX(clientX, rect) {
+  const frac = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+  return frac * pvTotal;
+}
+
+els.textTimeline.addEventListener("mousedown", (e) => {
+  if (!pvMode || !pvPlan.length || pvTotal <= 0) return;
+  const rect = tlBodyRect();
+  if (!rect) return;
+  const bar = e.target.closest(".txtl-bar");
+  if (bar) {
+    e.preventDefault();
+    const id = parseInt(bar.dataset.id, 10);
+    const t = texts.find(x => x.id === id);
+    selectText(id);
+    const handle = e.target.closest(".txtl-h");
+    if (handle) {
+      tlDrag = { mode: handle.dataset.h, id, bar, rect };
+    } else {
+      tlDrag = { mode: "move", id, bar, rect, startX: e.clientX, origStart: t.start, origEnd: t.end };
+    }
+    return;
+  }
+  // Empty area / ruler -> scrub the output
+  e.preventDefault();
+  tlDrag = { mode: "seek", rect };
+  pvSeekToOutput(tlTimeFromX(e.clientX, rect));
+});
+
+window.addEventListener("mousemove", (e) => {
+  if (!tlDrag) return;
+  if (tlDrag.mode === "seek") { pvSeekToOutput(tlTimeFromX(e.clientX, tlDrag.rect)); return; }
+  const t = texts.find(x => x.id === tlDrag.id);
+  if (!t) return;
+  const T = roundT(tlTimeFromX(e.clientX, tlDrag.rect));
+  if (tlDrag.mode === "start") {
+    const eMax = (t.end != null ? t.end : pvTotal) - 0.1;
+    t.start = Math.min(T, eMax);
+  } else if (tlDrag.mode === "end") {
+    const sMin = (t.start != null ? t.start : 0) + 0.1;
+    t.end = Math.max(T, sMin);
+  } else if (tlDrag.mode === "move") {
+    const oS = tlDrag.origStart != null ? tlDrag.origStart : 0;
+    const oE = tlDrag.origEnd != null ? tlDrag.origEnd : pvTotal;
+    const dur = oE - oS;
+    const dx = ((e.clientX - tlDrag.startX) / tlDrag.rect.width) * pvTotal;
+    let s = Math.max(0, Math.min(pvTotal - dur, oS + dx));
+    t.start = s; t.end = s + dur;
+  }
+  const r = txtlBarRect(t);
+  tlDrag.bar.style.left = `${r.left}%`;
+  tlDrag.bar.style.width = `${r.width}%`;
+});
+
+window.addEventListener("mouseup", () => {
+  if (!tlDrag) return;
+  const editing = tlDrag.mode !== "seek";
+  const id = tlDrag.id;
+  tlDrag = null;
+  if (!editing) return;
+  const t = texts.find(x => x.id === id);
+  if (t) {
+    // Snap to the edges -> open-ended; both open = whole video.
+    if (t.start != null && t.start <= 0.05) t.start = null;
+    if (t.end != null && t.end >= pvTotal - 0.05) t.end = null;
+  }
+  renderTextList();      // rebuild rows (window label) + timeline with final values
+  renderTextOverlays();
+  saveState();
+});
+
+// Editor input handling (delegated)
+els.textList.addEventListener("input", (e) => {
+  const input = e.target.closest("[data-field]");
+  if (!input) return;
+  const row = input.closest(".text-row");
+  const id = parseInt(row.dataset.id, 10);
+  const t = texts.find(x => x.id === id);
+  if (!t) return;
+  const field = input.dataset.field;
+  if (field === "font") {
+    t.font = input.value;
+    if (fontSpec(t.font).noStyle) { t.bold = false; t.italic = false; }
+    renderTextList();   // refresh Bold/Italic enabled state for the new family
+    saveState();
+    return;
+  }
+  if (field === "text") { t.text = input.value; renderTextTimeline(); }
+  else if (field === "sizePct") t.sizePct = clampNum(input.value, 1, 30, t.sizePct);
+  else if (field === "color") t.color = input.value;
+  renderTextOverlays();
+  saveState();
+});
+els.textList.addEventListener("click", (e) => {
+  const btn = e.target.closest("button[data-act]");
+  if (!btn) return;
+  const id = parseInt(btn.closest(".text-row").dataset.id, 10);
+  const t = texts.find(x => x.id === id);
+  if (!t) return;
+  const act = btn.dataset.act;
+  if (act === "del") removeText(id);
+  else if (act === "locate") selectText(id);
+  else if (act === "bold" || act === "italic") {
+    if (fontSpec(t.font).noStyle) return;   // family has no bold/italic
+    t[act] = !t[act];
+    btn.classList.toggle("active", t[act]);
+    renderTextOverlays();
+    saveState();
+  }
+});
+// Selecting a row's text input highlights its overlay
+els.textList.addEventListener("focusin", (e) => {
+  const row = e.target.closest(".text-row");
+  if (!row) return;
+  const id = parseInt(row.dataset.id, 10);
+  if (selectedTextId !== id) selectText(id);
+});
+
+els.addTextBtn.addEventListener("click", addText);
+
+// ---- Drag a label on the player to reposition it --------------------
+let txDrag = null;  // {id, el}
+els.textOverlayLayer.addEventListener("mousedown", (e) => {
+  const el = e.target.closest(".tx-overlay");
+  if (!el) return;
+  e.preventDefault();
+  const id = parseInt(el.dataset.id, 10);
+  txDrag = { id, el };
+  el.classList.add("dragging");
+  selectedTextId = id;
+  els.textList.querySelectorAll(".text-row").forEach(r =>
+    r.classList.toggle("selected", parseInt(r.dataset.id, 10) === id));
+});
+window.addEventListener("mousemove", (e) => {
+  if (!txDrag) return;
+  const rect = els.textOverlayLayer.getBoundingClientRect();
+  const x = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+  const y = Math.max(0, Math.min(1, (e.clientY - rect.top) / rect.height));
+  const t = texts.find(x2 => x2.id === txDrag.id);
+  if (!t) return;
+  t.x = x; t.y = y;
+  txDrag.el.style.left = `${x * 100}%`;
+  txDrag.el.style.top = `${y * 100}%`;
+});
+window.addEventListener("mouseup", () => {
+  if (!txDrag) return;
+  txDrag.el.classList.remove("dragging");
+  txDrag = null;
+  saveState();
+});
+
+// Keep overlay font sizes correct when the player box resizes.
+window.addEventListener("resize", () => { if (texts.length) renderTextOverlays(); });
 
 // ---- Render summary -------------------------------------------------
 function refreshRenderSummary() {
@@ -1049,12 +1511,25 @@ function refreshRenderSummary() {
     return;
   }
   const srcLabel = sources.length > 1 ? ` • <b>${sources.length}</b> source videos` : "";
+  const txtCount = texts.filter(t => (t.text || "").trim()).length;
+  const txtLabel = txtCount ? ` • <b>${txtCount}</b> text` : "";
   els.renderSummary.innerHTML = `
-    <b>${clips.length}</b> events (<b>${slowCount}</b> with slow-mo ${slow}%, ${factor.toFixed(2)}×)${srcLabel} •
+    <b>${clips.length}</b> events (<b>${slowCount}</b> with slow-mo ${slow}%, ${factor.toFixed(2)}×)${srcLabel}${txtLabel} •
     intro <b>${intro}s</b> →
     real <b>${fmtClock(totalReal)}</b> + slow-mo <b>${fmtClock(totalSlow)}</b> =
     output ≈ <b>${fmtClock(totalOut)}</b> @ <b>${resShortLabel(outHeight)}</b>
   `;
+}
+
+// Map the editor overlays to the backend payload (drop blank-text ones).
+function textsPayload() {
+  return texts
+    .filter(t => (t.text || "").trim())
+    .map(t => ({
+      text: t.text, font: t.font, bold: !!t.bold, italic: !!t.italic,
+      size_pct: t.sizePct, color: t.color,
+      x: t.x, y: t.y, start: t.start, end: t.end, shadow: t.shadow !== false,
+    }));
 }
 
 // ---- Projects (server-side save/load) -------------------------------
@@ -1068,6 +1543,11 @@ function currentProjectPayload(name) {
     slow_percent: parseInt(els.slowSlider.value, 10),
     video: currentVideo || (clips[0] && clips[0].video) || "",
     clips: clips.map(c => ({ start: c.start, end: c.end, slowmo: c.slowmo !== false, video: c.video || "" })),
+    texts: texts.map(t => ({
+      text: t.text, font: t.font, bold: !!t.bold, italic: !!t.italic,
+      sizePct: t.sizePct, color: t.color,
+      x: t.x, y: t.y, start: t.start, end: t.end, shadow: t.shadow !== false,
+    })),
   };
 }
 
@@ -1088,6 +1568,10 @@ function applyProjectPayload(p) {
     // Migration: old projects stored clips without `video` (single-source) -> backfill.
     video: c.video || p.video || "",
   }));
+  // Text overlays (old projects without `texts` -> none).
+  texts = (p.texts || []).map(normalizeText);
+  selectedTextId = null;
+  renderTextList();
   // Loading a project is a fresh context — leave preview and drop undo history.
   if (pvMode) pvExit();
   clipUndoStack = [];
@@ -1283,6 +1767,7 @@ async function startRender() {
       player1: els.player1.value,
       player2: els.player2.value,
       out_height: outHeight || 0,
+      texts: textsPayload(),
     };
     const res = await fetch("/api/render", {
       method: "POST",
@@ -1391,6 +1876,8 @@ els.pvPlay.addEventListener("click", () => {
 els.pvPrev.addEventListener("click", pvPrev);
 els.pvNext.addEventListener("click", pvNext);
 els.pvExit.addEventListener("click", pvExit);
+els.previewBar.querySelectorAll("[data-pv-seek]").forEach(b =>
+  b.addEventListener("click", () => pvSeekOutput(parseFloat(b.dataset.pvSeek))));
 
 els.saveProjectBtn.addEventListener("click", saveProject);
 els.loadProjectBtn.addEventListener("click", loadProject);
@@ -1473,6 +1960,7 @@ document.addEventListener("keydown", (e) => {
   loadState();
   updateSlowLabel();
   renderClipsTable();
+  renderTextList();
   updatePlayBtn();
   updatePickLabel();
   updateUndoBtn();

@@ -486,6 +486,20 @@ class ClipModel(BaseModel):
     video: str = ""  # source video for this clip; falls back to RenderRequest.video
 
 
+class TextOverlayModel(BaseModel):
+    text: str = ""
+    font: str = "arial"
+    bold: bool = False
+    italic: bool = False
+    size_pct: float = Field(ge=1, le=30, default=6.0)
+    color: str = "#ffffff"
+    x: float = Field(ge=0, le=1, default=0.5)
+    y: float = Field(ge=0, le=1, default=0.85)
+    start: Optional[float] = Field(ge=0, default=None)
+    end: Optional[float] = Field(ge=0, default=None)
+    shadow: bool = True
+
+
 class RenderRequest(BaseModel):
     video: str = ""  # fallback source for clips that don't specify their own
     clips: List[ClipModel]
@@ -495,6 +509,7 @@ class RenderRequest(BaseModel):
     player1: str = ""
     player2: str = ""
     out_height: int = Field(ge=0, le=2160, default=0)  # 0 = native source height
+    texts: List[TextOverlayModel] = Field(default_factory=list, max_length=20)
 
 
 class ExportClipRequest(BaseModel):
@@ -572,6 +587,16 @@ async def start_render(req: RenderRequest) -> JSONResponse:
         clips.append(render.Clip(start=c.start, end=c.end, slowmo=c.slowmo,
                                  video_path=src))
 
+    # Text overlays: keep only those with actual content (cap defensively).
+    texts = [
+        render.TextOverlay(
+            text=t.text, font=t.font, bold=t.bold, italic=t.italic,
+            size_pct=t.size_pct, color=t.color,
+            x=t.x, y=t.y, start=t.start, end=t.end, shadow=t.shadow,
+        )
+        for t in req.texts if (t.text or "").strip()
+    ][:20]
+
     # video_path on the job is just a fallback; use the first clip's source.
     job = render.RenderJob(
         job_id=uuid.uuid4().hex[:12],
@@ -583,6 +608,7 @@ async def start_render(req: RenderRequest) -> JSONResponse:
         player1=req.player1,
         player2=req.player2,
         out_height=req.out_height,
+        texts=texts,
     )
     render.register_job(job)
 

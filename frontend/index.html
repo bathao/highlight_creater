@@ -84,6 +84,9 @@
 
     <div class="player-wrap">
       <video id="player" preload="metadata" playsinline></video>
+      <!-- Live, draggable text-overlay layer (WYSIWYG positioning). Each label
+           maps to a fraction of this 16:9 box = the final canvas. -->
+      <div class="text-overlay-layer" id="textOverlayLayer"></div>
       <div class="overlay" id="overlayMsg">Pick a source video in Setup to begin</div>
     </div>
 
@@ -146,12 +149,34 @@
       <span class="pv-badge"><span class="pv-dot"></span> Preview output</span>
       <span class="pv-transport">
         <button class="pv-btn" id="pvPrev" title="Previous segment">⏮</button>
+        <button class="pv-btn" data-pv-seek="-5" title="Back 5s (output timeline)">−5s</button>
         <button class="pv-btn pv-play" id="pvPlay" title="Play / Pause">❚❚</button>
+        <button class="pv-btn" data-pv-seek="5" title="Forward 5s (output timeline)">+5s</button>
         <button class="pv-btn" id="pvNext" title="Next segment">⏭</button>
       </span>
       <span class="pv-phase" id="pvPhase">Event 1/1 · Real</span>
       <span class="pv-time" id="pvTime" title="output position / total output">0:00.00 / 0:00.00</span>
       <button class="pv-exit" id="pvExit" title="Exit preview (Esc)">✕</button>
+    </div>
+
+    <!-- Text overlays editor: shown only while Preview output is on, so text is
+         edited against the real output (kept segments only), right by the video.
+         Pause the preview to drag labels; play to verify their time windows. -->
+    <div class="text-panel hidden" id="textPanel">
+      <div class="text-header">
+        <h3>Text overlays (<span id="textCount">0</span>)</h3>
+        <button id="addTextBtn" type="button" class="btn small primary">＋ Add text</button>
+      </div>
+      <p class="muted text-hint">
+        Burned onto the final video. On the timeline below, <b>drag a text bar to move it</b>,
+        <b>drag its edges to set start/end</b>, or <b>click a bar to edit</b> that text. Drag a bar to span the
+        whole width = show for the whole video. <b>Pause &amp; drag the label on the player</b> to position it on screen.
+        (The timeline is the highlight output — the intro is added automatically.)
+      </p>
+      <!-- CapCut-style output timeline: a base video track (the kept segments)
+           plus one lane per text whose bar = its [start,end] window. -->
+      <div id="textTimeline" class="tx-timeline"></div>
+      <div id="textList" class="text-list"></div>
     </div>
 
     <div class="player-meta">
