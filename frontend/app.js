@@ -1335,19 +1335,15 @@ function renderTextOverlays() {
 // Times are output-relative (same scale as the timeline + pv-time readout);
 // the backend adds the intro offset at render. Also moves the timeline playhead.
 function syncTextOverlayTiming() {
-  const inPv = pvMode && pvPlan.length;
-  const pos = inPv ? pvOutputPos() : null;
-  const paused = inPv && els.player.paused;
+  const pos = (pvMode && pvPlan.length) ? pvOutputPos() : null;
   els.textOverlayLayer.querySelectorAll(".tx-overlay").forEach((node) => {
     const t = texts.find(x => String(x.id) === node.dataset.id);
     if (!t) return;
     let visible = true;
-    // Selected text stays visible while PAUSED (so it can be positioned even
-    // when the playhead is outside its window); everything else — and all
-    // texts while playing — follows its time window. A label being edited
-    // inline always stays visible.
-    const forceShow = (paused && t.id === selectedTextId) || t.id === txEditId;
-    if (pos !== null && !forceShow) {
+    // Visibility strictly follows the time window so the player mirrors the
+    // current frame. Only a label being edited inline is force-shown (selecting
+    // a text instead moves the playhead to its start — see selectText).
+    if (pos !== null && t.id !== txEditId) {
       const s = t.start != null ? t.start : 0;
       const e = t.end != null ? t.end : Infinity;
       visible = pos >= s && pos <= e;
@@ -1451,6 +1447,16 @@ function selectText(id) {
     r.classList.toggle("selected", parseInt(r.dataset.id, 10) === id));
   els.textTimeline.querySelectorAll(".txtl-bar").forEach(b =>
     b.classList.toggle("selected", parseInt(b.dataset.id, 10) === id));
+  // Move the output playhead to this text's start so the preview shows exactly
+  // it (others outside their window hide). Skip if already inside its window
+  // (so editing fields on an already-revealed text doesn't keep re-seeking).
+  const t = texts.find(x => x.id === id);
+  if (t && pvMode && pvPlan.length && pvTotal > 0) {
+    const s = t.start != null ? t.start : 0;
+    const e = t.end != null ? t.end : pvTotal;
+    const pos = pvOutputPos();
+    if (pos < s || pos > e) pvSeekToOutput(s);
+  }
   renderTextOverlays();
 }
 
@@ -1661,7 +1667,10 @@ els.textList.addEventListener("focusin", (e) => {
   const row = e.target.closest(".text-row");
   if (!row) return;
   const id = parseInt(row.dataset.id, 10);
-  if (selectedTextId !== id) selectText(id);
+  // Always (re)reveal — selectText seeks to the text's start only if the
+  // playhead is outside its window, so focusing fields on an already-revealed
+  // text is a no-op but clicking a text whose moment has passed re-reveals it.
+  selectText(id);
 });
 
 els.addTextBtn.addEventListener("click", addText);
