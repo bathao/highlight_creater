@@ -239,6 +239,12 @@ input[type="range"] {
   cursor: pointer;
   user-select: none;
 }
+/* Raw-source scrubber disabled during preview — use the output timeline. */
+.timeline.pv-disabled {
+  pointer-events: none;
+  opacity: 0.4;
+  cursor: default;
+}
 .timeline-track {
   position: relative;
   width: 100%;
@@ -512,6 +518,12 @@ input[type="range"] {
 .tx-overlay:hover { border-color: rgba(41, 98, 255, 0.5); }
 .tx-overlay.selected { border-color: rgba(41, 98, 255, 0.9); border-style: dashed; }
 .tx-overlay.dragging { border-color: #2962ff; border-style: dashed; }
+.tx-overlay.editing {
+  cursor: text; user-select: text;
+  border: 1px solid #4a7dff; border-radius: 3px;
+  box-shadow: 0 0 0 2px rgba(41, 98, 255, 0.35);
+  outline: none;
+}
 
 /* Editor panel (lives inside the player card, shown only in preview) */
 .text-panel {
@@ -534,35 +546,73 @@ input[type="range"] {
 .text-list { display: flex; flex-direction: column; gap: 8px; }
 .text-empty { color: #6e7791; font-size: 13px; padding: 14px 4px; text-align: center; }
 .text-row {
-  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  display: flex; flex-direction: column; gap: 8px;
   background: #0f1525; border: 1px solid #1f2841; border-radius: 8px;
   padding: 8px 10px;
 }
 .text-row.selected { border-color: #2962ff; }
+.text-row .tx-main { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .text-row .tx-field { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; color: #8b94a7; }
 .text-row input[type="text"],
+.text-row input[type="number"],
+.text-row textarea,
 .text-row select {
   background: #0d1322; color: #e8ecf5;
   border: 1px solid #28324f; border-radius: 5px;
   padding: 6px 8px; font-size: 13px; font-family: inherit;
 }
-.text-row input[type="text"]:focus,
+.text-row input:focus,
+.text-row textarea:focus,
 .text-row select:focus { border-color: #4a7dff; outline: none; }
-.text-row .tx-content { flex: 1 1 200px; min-width: 140px; }
+.text-row textarea.tx-content {
+  flex: 1 1 200px; min-width: 140px; resize: none; overflow: hidden;
+  min-height: 32px; line-height: 1.3; white-space: pre-wrap;
+}
 .text-row .tx-font { flex: 0 0 auto; }
 .text-row .tx-size { width: 60px; }
-.text-row .tx-time { width: 64px; font-family: 'Cascadia Code', Consolas, monospace; }
 .text-row input[type="color"].tx-color {
   width: 38px; height: 30px; padding: 2px;
   background: #0d1322; border: 1px solid #28324f; border-radius: 6px; cursor: pointer;
 }
 .text-row .tx-spacer { flex: 1 1 auto; }
-.text-row .tx-locate, .text-row .tx-del {
+/* Generic icon buttons (duplicate / locate / delete / set-time) */
+.text-row .tx-icon {
   background: transparent; border: 1px solid #2c3550; color: #cdd5e6;
-  border-radius: 5px; padding: 5px 9px; font-size: 13px; line-height: 1;
+  border-radius: 5px; padding: 5px 9px; font-size: 13px; line-height: 1; cursor: pointer;
 }
-.text-row .tx-locate:hover { background: #232c47; border-color: #3a4670; color: #fff; }
+.text-row .tx-icon:hover { background: #232c47; border-color: #3a4670; color: #fff; }
 .text-row .tx-del:hover { background: #4a1a1a; border-color: #d83a3a; color: #ff8a8a; }
+/* Style row: position pad + box/fade/outline controls */
+.text-row .tx-style-row {
+  display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+  padding-top: 8px; border-top: 1px dashed #1f2841;
+}
+.text-row .tx-posgrid {
+  display: grid; grid-template-columns: repeat(3, 18px); grid-auto-rows: 18px; gap: 2px;
+}
+.text-row .tx-pos {
+  width: 18px; height: 18px; padding: 0; font-size: 11px; line-height: 1;
+  background: #0d1322; border: 1px solid #28324f; color: #8b94a7;
+  border-radius: 3px; cursor: pointer;
+}
+.text-row .tx-pos:hover { background: #1a2238; border-color: #3a4670; color: #fff; }
+.text-row .tx-group { display: inline-flex; align-items: center; gap: 6px; }
+.text-row .tx-toggle {
+  height: 28px; padding: 0 10px; font-size: 11px; line-height: 1;
+  background: #0d1322; border: 1px solid #28324f; color: #cdd5e6;
+  border-radius: 5px; cursor: pointer;
+}
+.text-row .tx-toggle:hover { background: #1a2238; border-color: #3a4670; color: #fff; }
+.text-row .tx-toggle.active { background: #14264a; border-color: #2962ff; color: #9bc0ff; }
+.text-row .tx-boxcolor { width: 30px; height: 28px; }
+.text-row .tx-op { width: 70px; accent-color: #2962ff; cursor: pointer; }
+.text-row .tx-op-readout {
+  width: 34px; font-size: 11px; color: #8b94a7;
+  font-family: 'Cascadia Code', Consolas, monospace;
+}
+.text-row .tx-num { width: 52px; }
+.text-row .tx-fade { gap: 4px; }
+.text-row .tx-setpos { flex: 0 0 auto; padding: 4px 7px; }
 /* Bold / Italic toggles */
 .text-row .tx-style {
   width: 28px; height: 30px;
@@ -580,6 +630,21 @@ input[type="range"] {
   font-size: 11px; color: #8b94a7;
   font-family: 'Cascadia Code', Consolas, monospace;
   white-space: nowrap;
+}
+/* Per-text start/end range sliders (own row, wraps under the controls) */
+.text-row .tx-timing {
+  flex: 1 1 100%; display: flex; gap: 16px; flex-wrap: wrap;
+  padding-top: 8px; margin-top: 2px; border-top: 1px dashed #1f2841;
+}
+.text-row .tx-slider {
+  flex: 1 1 240px; display: flex; align-items: center; gap: 8px;
+  font-size: 11px; color: #8b94a7;
+}
+.text-row .tx-slabel { flex: 0 0 34px; }
+.text-row .tx-range { flex: 1 1 auto; accent-color: #2962ff; cursor: pointer; min-width: 80px; }
+.text-row .tx-time-readout {
+  flex: 0 0 58px; text-align: right;
+  font-family: 'Cascadia Code', Consolas, monospace; color: #cdd5e6;
 }
 
 /* ----- CapCut-style output timeline ----- */

@@ -1,6 +1,6 @@
 # Highlight Creator — Project Status
 
-> Updated: 2026-06-15 (v1.4 — text overlays burned into the final video, with a CapCut-style output timeline) — NOT yet committed
+> Updated: 2026-06-16 (v1.4 — text overlays burned into the final video, with a CapCut-style output timeline, committed `6db33b8`; docs `024fd67`)
 > Previous: 2026-06-15 (v1.3 — preview output playback + drag-and-drop event reordering, commit `8c80dd7`)
 > Earlier: 2026-06-15 (v1.2 — pick source from anywhere on disk, native file dialog, selectable output resolution, undo, English UI)
 > Earlier: 2026-05-31 (v1.1 — multi-source input + UI refinements, commit `ed85265`)
@@ -157,7 +157,7 @@ Open http://127.0.0.1:8770, click **Choose source video…** to pick footage fro
 
 ## 6. Suggested next steps
 
-0. **Commit v1.4** (text overlays) — currently working in the tree but not yet committed
+0. ~~**Commit v1.4**~~ — DONE 2026-06-16 (`6db33b8`); working tree clean
 1. **Write README.md** with screenshots + a workflow demo GIF
 2. **Create a `start` shell script** for Linux/macOS users (if cross-platform is needed)
 3. **Add `pytest`** tests for `render._atempo_chain`, `render._expected_total_duration`, source/project path validation

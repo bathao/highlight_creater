@@ -112,6 +112,7 @@ const probeCache = {};   // video path -> probe info {width,height,fps,...}
 let texts = [];
 let nextTextId = 1;
 let selectedTextId = null;
+let txEditId = null;   // id of the overlay being edited inline (null = none)
 
 // Curated font families — keys match backend FONT_FAMILIES. `noStyle` marks
 // families without bold/italic variants (Impact) so those toggles disable.
@@ -215,6 +216,10 @@ function normalizeText(t) {
     start: (typeof t.start === "number" && isFinite(t.start)) ? t.start : null,
     end: (typeof t.end === "number" && isFinite(t.end)) ? t.end : null,
     shadow: t.shadow !== false,
+    box: !!t.box,
+    boxColor: /^#[0-9a-fA-F]{6}$/.test(t.boxColor || "") ? t.boxColor : "#000000",
+    boxOpacity: clampNum(t.boxOpacity, 0, 1, 0.45),
+    fade: clampNum(t.fade, 0, 10, 0),
   };
 }
 function clampNum(v, lo, hi, dflt) {
@@ -501,11 +506,19 @@ async function refreshResolutionOptions() {
 
 // ---- Player ---------------------------------------------------------
 function updatePlayerTime() {
+  // In preview, mirror the OUTPUT position so the (dimmed) raw bar tracks the
+  // assembled output smoothly instead of jumping with each source segment.
+  if (pvMode && pvPlan.length && pvTotal > 0) {
+    const op = pvOutputPos();
+    els.playerTime.textContent = `${fmt(op)} / ${fmt(pvTotal)}`;
+    const pct = (op / pvTotal) * 100;
+    els.timelineProgress.style.width = `${pct}%`;
+    els.timelineThumb.style.left = `${pct}%`;
+    return;
+  }
   const c = els.player.currentTime || 0;
   const d = els.player.duration || 0;
   els.playerTime.textContent = `${fmt(c)} / ${fmt(d)}`;
-
-  // Timeline progress + thumb
   const pct = d > 0 ? (c / d) * 100 : 0;
   els.timelineProgress.style.width = `${pct}%`;
   els.timelineThumb.style.left = `${pct}%`;
@@ -533,6 +546,12 @@ function updatePlayBtn() {
   }
 }
 
+// Keep both transports (main control + preview transport) in lockstep with the
+// element's real paused state. Call after any explicit play()/pause() so the
+// icon never lags the actual state (the play/pause events alone can be raced
+// by a seek that switches segments right after).
+function syncPlayButtons() { updatePlayBtn(); pvSyncPlayBtn(); }
+
 els.player.addEventListener("timeupdate", updatePlayerTime);
 els.player.addEventListener("loadedmetadata", () => {
   updatePlayerTime();
@@ -542,9 +561,13 @@ els.player.addEventListener("durationchange", () => {
   updatePlayerTime();
 });
 els.player.addEventListener("progress", updateBuffered);
-els.player.addEventListener("play",  () => { updatePlayBtn(); pvSyncPlayBtn(); syncTextOverlayTiming(); });
-els.player.addEventListener("pause", () => { updatePlayBtn(); pvSyncPlayBtn(); syncTextOverlayTiming(); });
+els.player.addEventListener("play",  () => { updatePlayBtn(); pvSyncPlayBtn(); syncTextOverlayTiming(); if (pvMode) pvArmWatchdog(pvPlan[pvPos]); });
+els.player.addEventListener("pause", () => { updatePlayBtn(); pvSyncPlayBtn(); syncTextOverlayTiming(); if (pvWatchdog) { clearTimeout(pvWatchdog); pvWatchdog = null; } });
 els.player.addEventListener("ended", () => { updatePlayBtn(); pvSyncPlayBtn(); syncTextOverlayTiming(); });
+// Extra safety nets so the play/pause icon always matches reality, even when a
+// state change rides in on a seek/stall rather than a clean play/pause event.
+["playing", "seeked", "waiting", "canplay"].forEach(ev =>
+  els.player.addEventListener(ev, syncPlayButtons));
 
 // ---- Custom control bar ---------------------------------------------
 els.playBtn.addEventListener("click", () => {
@@ -568,27 +591,32 @@ els.speedSelect.addEventListener("change", () => {
 // ---- Timeline scrubbing --------------------------------------------
 let scrubbing = false;
 
-function timelineSeekFromEvent(e) {
-  const d = els.player.duration || 0;
-  if (!d) return;
+function timelineFracFromEvent(e) {
   const rect = els.timeline.getBoundingClientRect();
   const x = (e.touches ? e.touches[0].clientX : e.clientX) - rect.left;
-  const pct = Math.max(0, Math.min(1, x / rect.width));
-  els.player.currentTime = pct * d;
+  return Math.max(0, Math.min(1, x / rect.width));
+}
+
+function timelineSeekFromEvent(e) {
+  // The raw-source timeline is disabled during preview (the CapCut output
+  // timeline is the only scrubber then) — see the `pv-disabled` guard.
+  if (pvMode) return;
+  const d = els.player.duration || 0;
+  if (!d) return;
+  els.player.currentTime = timelineFracFromEvent(e) * d;
 }
 
 function timelineHoverFromEvent(e) {
+  if (pvMode) { els.timelineTooltip.style.opacity = "0"; return; }
   const d = els.player.duration || 0;
   if (!d) { els.timelineTooltip.style.opacity = "0"; return; }
-  const rect = els.timeline.getBoundingClientRect();
-  const x = (e.touches ? e.touches[0].clientX : e.clientX) - rect.left;
-  const pct = Math.max(0, Math.min(1, x / rect.width));
+  const pct = timelineFracFromEvent(e);
   els.timelineTooltip.textContent = fmt(pct * d);
   els.timelineTooltip.style.left = `${pct * 100}%`;
 }
 
 els.timeline.addEventListener("mousedown", (e) => {
-  if (!els.player.src) return;
+  if (!els.player.src || pvMode) return;   // raw timeline is disabled in preview
   scrubbing = true;
   timelineSeekFromEvent(e);
 });
@@ -1001,6 +1029,7 @@ function pvEnter() {
   els.textPanel.classList.remove("hidden");   // text editor lives in the preview context
   els.previewOutputBtn.classList.add("active");
   els.previewOutputBtn.textContent = "■ Stop preview";
+  els.timeline.classList.add("pv-disabled");   // raw scrubber off; use the output timeline
   renderTextList();                            // (re)draw editor + overlays now visible
   const intro = parseFloat(els.introSeconds.value || "0");
   flashTopMessage(`Preview output — ${pvPlan.length} segment(s)${intro ? `, intro ${intro}s not shown` : ""}`);
@@ -1018,6 +1047,7 @@ function pvExit() {
   els.textPanel.classList.add("hidden");
   els.previewOutputBtn.classList.remove("active");
   els.previewOutputBtn.textContent = "▶ Preview output";
+  els.timeline.classList.remove("pv-disabled");
   renderTextOverlays();   // pvMode now false -> clears the overlay layer
 }
 
@@ -1034,6 +1064,7 @@ function pvStartSegment(i, autoplay, startAt) {
     if (autoplay) els.player.play().catch(() => {});
     pvAttachWatch(seg);
     pvUpdateBar();
+    syncPlayButtons();
   };
   if (seg.video && seg.video !== currentVideo) {
     pvSwitching = true;
@@ -1051,6 +1082,7 @@ function pvStartSegment(i, autoplay, startAt) {
 
 function pvAttachWatch(seg) {
   const watcher = () => {
+    if (els.player.paused) return;   // ignore seek-driven timeupdates while paused
     if ((els.player.currentTime || 0) >= seg.end - 0.03) {
       pvAdvance();
     } else {
@@ -1059,8 +1091,16 @@ function pvAttachWatch(seg) {
   };
   pvWatcher = watcher;
   els.player.addEventListener("timeupdate", watcher);
-  // Wall-clock fallback: a real segment plays in srcDur seconds, a slow one in
-  // srcDur/rate = outDur seconds. Add slack for buffering/source switching.
+  pvArmWatchdog(seg);
+}
+
+// Wall-clock fallback that auto-advances to the next segment. Only armed while
+// actually PLAYING — otherwise a paused scrub/seek into a segment would
+// schedule a spurious jump, which felt like the timeline "jerking".
+function pvArmWatchdog(seg) {
+  if (pvWatchdog) { clearTimeout(pvWatchdog); pvWatchdog = null; }
+  if (!pvMode || !seg || els.player.paused) return;
+  // A real segment plays in srcDur seconds, a slow one in srcDur/rate = outDur.
   pvWatchdog = setTimeout(pvAdvance, seg.outDur * 1000 + 2000);
 }
 
@@ -1074,7 +1114,7 @@ function pvAdvance() {
 function pvFinish() {
   pvClearWatch();
   els.player.pause();
-  pvSyncPlayBtn();
+  syncPlayButtons();
   flashTopMessage("Preview finished");
 }
 
@@ -1117,6 +1157,22 @@ function pvSeekToOutput(T) {
 }
 function pvSeekOutput(delta) { pvSeekToOutput(pvOutputPos() + delta); }
 
+// Coalesced scrub for dragging the output timeline: while a seek is still in
+// flight, just remember the latest target instead of queuing more seeks (a
+// 2.6K/60fps source can't decode a new keyframe per mousemove) — the pending
+// one is applied when the current seek finishes. Keeps the scrub smooth.
+let pvSeekPending = null;
+function pvScrubTo(T) {
+  if (els.player.seeking) { pvSeekPending = T; return; }
+  pvSeekToOutput(T);
+}
+els.player.addEventListener("seeked", () => {
+  if (pvSeekPending == null) return;
+  const t = pvSeekPending;
+  pvSeekPending = null;
+  pvScrubTo(t);
+});
+
 function pvUpdateBar() {
   if (!pvMode || !pvPlan.length) return;
   const seg = pvPlan[pvPos];
@@ -1152,6 +1208,13 @@ function renderTextList() {
   const fontOpts = (sel) => FONT_OPTIONS
     .map(f => `<option value="${f.key}" ${f.key === sel ? "selected" : ""}>${f.label}</option>`)
     .join("");
+  // Slider range = the whole output duration (intro excluded, like the timeline).
+  const pvMax = pvTotal > 0 ? roundT(pvTotal) : 0;
+  // 3x3 quick-position pad (data-pos = "<row><col>", row t/m/b, col l/c/r).
+  const posGrid = `<div class="tx-posgrid" title="Quick position">` +
+    [["tl","↖"],["tc","↑"],["tr","↗"],["ml","←"],["mc","⊙"],["mr","→"],["bl","↙"],["bc","↓"],["br","↘"]]
+      .map(([p, g]) => `<button class="tx-pos" data-act="pos" data-pos="${p}">${g}</button>`).join("") +
+    `</div>`;
   els.textList.innerHTML = "";
   texts.forEach((t) => {
     const noStyle = !!fontSpec(t.font).noStyle;
@@ -1160,34 +1223,68 @@ function renderTextList() {
     row.className = "text-row" + (t.id === selectedTextId ? " selected" : "");
     row.dataset.id = t.id;
     row.innerHTML = `
-      <input class="tx-content" data-field="text" type="text" placeholder="Text…" value="${escapeAttr(t.text)}" />
-      <select class="tx-font" data-field="font" title="Font">${fontOpts(t.font)}</select>
-      <button class="tx-style ${t.bold ? "active" : ""}" data-act="bold" ${dis} title="Bold">B</button>
-      <button class="tx-style ${t.italic ? "active" : ""}" data-act="italic" ${dis} title="Italic">I</button>
-      <label class="tx-field">Size
-        <input class="tx-size" data-field="sizePct" type="number" min="1" max="30" step="0.5" value="${t.sizePct}" title="Font size (% of frame height)" />
-      </label>
-      <input class="tx-color" data-field="color" type="color" value="${t.color}" title="Text color" />
-      <span class="tx-window" title="Time window — set it on the timeline above">${windowLabel(t)}</span>
-      <span class="tx-spacer"></span>
-      <button class="tx-locate" data-act="locate" title="Find on timeline / player">⌖</button>
-      <button class="tx-del" data-act="del" title="Delete">✕</button>
+      <div class="tx-main">
+        <textarea class="tx-content" data-field="text" rows="1" placeholder="Text… (Enter = new line)">${escapeAttr(t.text)}</textarea>
+        <select class="tx-font" data-field="font" title="Font">${fontOpts(t.font)}</select>
+        <button class="tx-style ${t.bold ? "active" : ""}" data-act="bold" ${dis} title="Bold">B</button>
+        <button class="tx-style ${t.italic ? "active" : ""}" data-act="italic" ${dis} title="Italic">I</button>
+        <label class="tx-field">Size
+          <input class="tx-size" data-field="sizePct" type="number" min="1" max="30" step="0.5" value="${t.sizePct}" title="Font size (% of frame height)" />
+        </label>
+        <input class="tx-color" data-field="color" type="color" value="${t.color}" title="Text color" />
+        <span class="tx-spacer"></span>
+        <button class="tx-icon" data-act="dup" title="Duplicate">⧉</button>
+        <button class="tx-icon" data-act="locate" title="Find on timeline / player">⌖</button>
+        <button class="tx-icon tx-del" data-act="del" title="Delete">✕</button>
+      </div>
+      <div class="tx-style-row">
+        ${posGrid}
+        <span class="tx-group">
+          <button class="tx-toggle ${t.box ? "active" : ""}" data-act="box" title="Background box behind the text">BG</button>
+          <input class="tx-color tx-boxcolor" data-field="boxColor" type="color" value="${t.boxColor}" title="Box color" />
+          <input class="tx-op" data-field="boxOpacity" type="range" min="0" max="1" step="0.05" value="${t.boxOpacity}" title="Box opacity" />
+          <span class="tx-op-readout">${Math.round(t.boxOpacity * 100)}%</span>
+        </span>
+        <label class="tx-field tx-fade" title="Fade in/out duration (seconds) — 0 = hard cut">Fade
+          <input class="tx-num" data-field="fade" type="number" min="0" max="10" step="0.1" value="${t.fade}" />s
+        </label>
+        <button class="tx-toggle ${t.shadow ? "active" : ""}" data-act="shadow" title="Outline for legibility">Outline</button>
+      </div>
+      <div class="tx-timing">
+        <label class="tx-slider" title="Drag to set when the text appears — full left = from the very start">
+          <span class="tx-slabel">Start</span>
+          <input type="range" class="tx-range" data-field="start" min="0" max="${pvMax}" step="0.05" value="${t.start != null ? t.start : 0}" />
+          <span class="tx-time-readout" data-for="start">${t.start != null ? fmt(t.start) : "start"}</span>
+          <button class="tx-icon tx-setpos" data-act="setStart" title="Set start = current preview position">⤓</button>
+        </label>
+        <label class="tx-slider" title="Drag to set when the text disappears — full right = until the very end">
+          <span class="tx-slabel">End</span>
+          <input type="range" class="tx-range" data-field="end" min="0" max="${pvMax}" step="0.05" value="${t.end != null ? t.end : pvMax}" />
+          <span class="tx-time-readout" data-for="end">${t.end != null ? fmt(t.end) : "end"}</span>
+          <button class="tx-icon tx-setpos" data-act="setEnd" title="Set end = current preview position">⤓</button>
+        </label>
+      </div>
     `;
     els.textList.appendChild(row);
+    // Auto-size the (possibly multi-line) text box to its content.
+    const ta = row.querySelector("textarea.tx-content");
+    if (ta) { ta.style.height = "auto"; ta.style.height = `${ta.scrollHeight}px`; }
   });
   renderTextOverlays();
   renderTextTimeline();
   refreshRenderSummary();
 }
 
-// Compact "0:03 – 0:08" / "whole video" label for a text's time window.
-function windowLabel(t) {
-  if (t.start == null && t.end == null) return "∞ whole video";
-  return `${t.start != null ? fmt(t.start) : "start"} – ${t.end != null ? fmt(t.end) : "end"}`;
-}
-
 function escapeAttr(s) {
   return String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
+}
+
+// "#rrggbb" + alpha (0..1) -> "rgba(r,g,b,a)" for the WYSIWYG box preview.
+function hexToRgba(hex, a) {
+  const m = /^#?([0-9a-fA-F]{6})$/.exec(hex || "");
+  const n = m ? parseInt(m[1], 16) : 0;
+  const al = Math.max(0, Math.min(1, parseFloat(a)));
+  return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${isFinite(al) ? al : 0.45})`;
 }
 
 // (Re)build the draggable labels over the player. Font size is px relative to
@@ -1213,28 +1310,44 @@ function renderTextOverlays() {
     el.style.fontStyle = t.italic ? "italic" : "normal";
     el.style.color = t.color;
     el.style.fontSize = `${(t.sizePct / 100) * boxH}px`;
+    el.style.whiteSpace = "pre-line";   // honour newlines in multi-line text
+    el.style.textAlign = "center";
     el.style.textShadow = t.shadow
       ? "0 0 2px #000, 1px 1px 2px #000, -1px -1px 2px #000" : "none";
+    if (t.box) {
+      el.style.backgroundColor = hexToRgba(t.boxColor, t.boxOpacity);
+      const padY = Math.max(2, (t.sizePct / 100) * boxH * 0.18);
+      const padX = Math.max(4, (t.sizePct / 100) * boxH * 0.3);
+      el.style.padding = `${padY}px ${padX}px`;
+    } else {
+      el.style.backgroundColor = "transparent";
+      el.style.padding = "0";
+    }
     layer.appendChild(el);
   });
   syncTextOverlayTiming();
 }
 
-// While the preview is PLAYING, show only overlays whose time window covers the
-// current OUTPUT position (verify timing). While PAUSED (or not in preview),
-// show them all so any label can be dragged/positioned. Times are output-
-// relative (same scale as the timeline + pv-time readout); the backend adds
-// the intro offset at render. Also moves the timeline playhead.
+// Show an overlay only when the current OUTPUT position falls inside its time
+// window — so the player is a faithful preview of that frame, whether playing
+// OR paused. Exception: the currently-SELECTED text is always shown so it can
+// still be dragged/positioned even when the playhead sits outside its window.
+// Times are output-relative (same scale as the timeline + pv-time readout);
+// the backend adds the intro offset at render. Also moves the timeline playhead.
 function syncTextOverlayTiming() {
-  let pos = null;
-  if (pvMode && pvPlan.length && !els.player.paused) {
-    pos = pvOutputPos();
-  }
+  const inPv = pvMode && pvPlan.length;
+  const pos = inPv ? pvOutputPos() : null;
+  const paused = inPv && els.player.paused;
   els.textOverlayLayer.querySelectorAll(".tx-overlay").forEach((node) => {
     const t = texts.find(x => String(x.id) === node.dataset.id);
     if (!t) return;
     let visible = true;
-    if (pos !== null) {
+    // Selected text stays visible while PAUSED (so it can be positioned even
+    // when the playhead is outside its window); everything else — and all
+    // texts while playing — follows its time window. A label being edited
+    // inline always stays visible.
+    const forceShow = (paused && t.id === selectedTextId) || t.id === txEditId;
+    if (pos !== null && !forceShow) {
       const s = t.start != null ? t.start : 0;
       const e = t.end != null ? t.end : Infinity;
       visible = pos >= s && pos <= e;
@@ -1268,6 +1381,20 @@ function addText() {
 function removeText(id) {
   texts = texts.filter(t => t.id !== id);
   if (selectedTextId === id) selectedTextId = null;
+  renderTextList();
+  saveState();
+}
+
+// Clone a text (style + timing) right below the original, nudged down a touch
+// so the copy isn't hidden under it.
+function duplicateText(id) {
+  const src = texts.find(t => t.id === id);
+  if (!src) return;
+  const copy = normalizeText({ ...src, id: nextTextId++ });
+  copy.y = clampNum(src.y + 0.06, 0, 1, src.y);
+  const idx = texts.findIndex(t => t.id === id);
+  texts.splice(idx + 1, 0, copy);
+  selectedTextId = copy.id;
   renderTextList();
   saveState();
 }
@@ -1356,15 +1483,17 @@ els.textTimeline.addEventListener("mousedown", (e) => {
     }
     return;
   }
-  // Empty area / ruler -> scrub the output
+  // Empty area / ruler -> scrub the output, preserving the play state: seek to
+  // the clicked point and keep playing if it was playing (pvSeekToOutput reads
+  // wasPlaying), or stay put if paused.
   e.preventDefault();
   tlDrag = { mode: "seek", rect };
-  pvSeekToOutput(tlTimeFromX(e.clientX, rect));
+  pvScrubTo(tlTimeFromX(e.clientX, rect));
 });
 
 window.addEventListener("mousemove", (e) => {
   if (!tlDrag) return;
-  if (tlDrag.mode === "seek") { pvSeekToOutput(tlTimeFromX(e.clientX, tlDrag.rect)); return; }
+  if (tlDrag.mode === "seek") { pvScrubTo(tlTimeFromX(e.clientX, tlDrag.rect)); return; }
   const t = texts.find(x => x.id === tlDrag.id);
   if (!t) return;
   const T = roundT(tlTimeFromX(e.clientX, tlDrag.rect));
@@ -1413,6 +1542,27 @@ els.textList.addEventListener("input", (e) => {
   const t = texts.find(x => x.id === id);
   if (!t) return;
   const field = input.dataset.field;
+  // Start/End range sliders: update live as you drag. The final value is
+  // committed (and a slider parked at the very edge snapped to "open") on
+  // `change`. Keep start < end throughout the drag.
+  if (field === "start" || field === "end") {
+    let v = roundT(parseFloat(input.value));
+    if (!isFinite(v)) return;
+    if (field === "start") {
+      const eMax = (t.end != null ? t.end : pvTotal) - 0.1;
+      v = Math.max(0, Math.min(v, eMax));
+    } else {
+      const sMin = (t.start != null ? t.start : 0) + 0.1;
+      v = Math.min(pvTotal, Math.max(v, sMin));
+    }
+    input.value = v;
+    t[field] = v;
+    const ro = input.parentElement.querySelector(".tx-time-readout");
+    if (ro) ro.textContent = fmt(v);
+    renderTextTimeline();   // live-move the bar on the CapCut timeline
+    renderTextOverlays();   // show/hide the player label by the new window
+    return;
+  }
   if (field === "font") {
     t.font = input.value;
     if (fontSpec(t.font).noStyle) { t.bold = false; t.italic = false; }
@@ -1420,9 +1570,39 @@ els.textList.addEventListener("input", (e) => {
     saveState();
     return;
   }
-  if (field === "text") { t.text = input.value; renderTextTimeline(); }
+  if (field === "boxOpacity") {
+    t.boxOpacity = clampNum(input.value, 0, 1, 0.45);
+    const ro = input.parentElement.querySelector(".tx-op-readout");
+    if (ro) ro.textContent = `${Math.round(t.boxOpacity * 100)}%`;
+    renderTextOverlays();
+    saveState();
+    return;
+  }
+  if (field === "boxColor") { t.boxColor = input.value; renderTextOverlays(); saveState(); return; }
+  if (field === "fade") { t.fade = clampNum(input.value, 0, 10, 0); renderTextOverlays(); saveState(); return; }
+  if (field === "text") {
+    t.text = input.value;
+    if (input.tagName === "TEXTAREA") { input.style.height = "auto"; input.style.height = `${input.scrollHeight}px`; }
+    renderTextTimeline();
+  }
   else if (field === "sizePct") t.sizePct = clampNum(input.value, 1, 30, t.sizePct);
   else if (field === "color") t.color = input.value;
+  renderTextOverlays();
+  saveState();
+});
+// Commit a start/end slider when the drag ends (`change` fires on release).
+// A slider parked at its far edge means "open" (start=0 -> from the very
+// start; end=pvTotal -> until the very end); both open = whole video. This
+// mirrors the CapCut-timeline snap so the two stay consistent.
+els.textList.addEventListener("change", (e) => {
+  const input = e.target.closest("input.tx-range[data-field]");
+  if (!input) return;
+  const id = parseInt(input.closest(".text-row").dataset.id, 10);
+  const t = texts.find(x => x.id === id);
+  if (!t) return;
+  if (t.start != null && t.start <= 0.05) t.start = null;
+  if (t.end != null && t.end >= pvTotal - 0.05) t.end = null;
+  renderTextList();   // rebuild rows + timeline with the snapped values
   renderTextOverlays();
   saveState();
 });
@@ -1433,14 +1613,47 @@ els.textList.addEventListener("click", (e) => {
   const t = texts.find(x => x.id === id);
   if (!t) return;
   const act = btn.dataset.act;
-  if (act === "del") removeText(id);
-  else if (act === "locate") selectText(id);
-  else if (act === "bold" || act === "italic") {
+  if (act === "del") return removeText(id);
+  if (act === "locate") return selectText(id);
+  if (act === "dup") return duplicateText(id);
+  if (act === "bold" || act === "italic") {
     if (fontSpec(t.font).noStyle) return;   // family has no bold/italic
     t[act] = !t[act];
     btn.classList.toggle("active", t[act]);
     renderTextOverlays();
     saveState();
+    return;
+  }
+  if (act === "box" || act === "shadow") {
+    t[act] = !t[act];
+    btn.classList.toggle("active", t[act]);
+    renderTextOverlays();
+    saveState();
+    return;
+  }
+  if (act === "pos") {
+    const p = btn.dataset.pos;  // "<row><col>", row t/m/b, col l/c/r
+    const yMap = { t: 0.10, m: 0.5, b: 0.88 };
+    const xMap = { l: 0.12, c: 0.5, r: 0.88 };
+    t.y = yMap[p[0]]; t.x = xMap[p[1]];
+    renderTextOverlays();
+    saveState();
+    return;
+  }
+  if (act === "setStart" || act === "setEnd") {
+    if (!pvMode || pvTotal <= 0) { flashTopMessage("Play the preview to grab a position"); return; }
+    const pos = roundT(Math.max(0, Math.min(pvTotal, pvOutputPos())));
+    if (act === "setStart") {
+      t.start = pos <= 0.05 ? null : pos;
+      if (t.start != null && t.end != null && t.end - t.start < 0.1) t.start = Math.max(0, t.end - 0.1);
+    } else {
+      t.end = pos >= pvTotal - 0.05 ? null : pos;
+      if (t.start != null && t.end != null && t.end - t.start < 0.1) t.end = Math.min(pvTotal, t.start + 0.1);
+    }
+    renderTextList();
+    renderTextOverlays();
+    saveState();
+    return;
   }
 });
 // Selecting a row's text input highlights its overlay
@@ -1458,6 +1671,7 @@ let txDrag = null;  // {id, el}
 els.textOverlayLayer.addEventListener("mousedown", (e) => {
   const el = e.target.closest(".tx-overlay");
   if (!el) return;
+  if (el.classList.contains("editing")) return;  // inline editing — let the mouse select text
   e.preventDefault();
   const id = parseInt(el.dataset.id, 10);
   txDrag = { id, el };
@@ -1469,8 +1683,13 @@ els.textOverlayLayer.addEventListener("mousedown", (e) => {
 window.addEventListener("mousemove", (e) => {
   if (!txDrag) return;
   const rect = els.textOverlayLayer.getBoundingClientRect();
-  const x = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-  const y = Math.max(0, Math.min(1, (e.clientY - rect.top) / rect.height));
+  let x = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+  let y = Math.max(0, Math.min(1, (e.clientY - rect.top) / rect.height));
+  // Snap to the centre lines (hold Shift to position freely).
+  if (!e.shiftKey) {
+    if (Math.abs(x - 0.5) < 0.02) x = 0.5;
+    if (Math.abs(y - 0.5) < 0.02) y = 0.5;
+  }
   const t = texts.find(x2 => x2.id === txDrag.id);
   if (!t) return;
   t.x = x; t.y = y;
@@ -1482,6 +1701,75 @@ window.addEventListener("mouseup", () => {
   txDrag.el.classList.remove("dragging");
   txDrag = null;
   saveState();
+});
+
+// ---- Double-click a label on the player to edit its text inline -----
+// The overlay becomes contenteditable in place; Enter (or click away / Esc)
+// commits, Shift+Enter adds a line. While editing, dragging is suppressed so
+// the mouse can place the caret / select text.
+els.textOverlayLayer.addEventListener("dblclick", (e) => {
+  const el = e.target.closest(".tx-overlay");
+  if (!el) return;
+  e.preventDefault();
+  startInlineEdit(parseInt(el.dataset.id, 10), el);
+});
+
+function startInlineEdit(id, el) {
+  if (txDrag) { txDrag.el.classList.remove("dragging"); txDrag = null; }
+  selectedTextId = id;
+  txEditId = id;
+  el.classList.add("editing");
+  try { el.contentEditable = "plaintext-only"; }
+  catch (_) { el.contentEditable = "true"; }
+  el.focus();
+  // Select all existing text so typing replaces it.
+  const range = document.createRange();
+  range.selectNodeContents(el);
+  const sel = window.getSelection();
+  sel.removeAllRanges();
+  sel.addRange(range);
+  els.textList.querySelectorAll(".text-row").forEach(r =>
+    r.classList.toggle("selected", parseInt(r.dataset.id, 10) === id));
+}
+
+function commitInlineEdit() {
+  if (txEditId == null) return;
+  const el = els.textOverlayLayer.querySelector(`.tx-overlay[data-id="${txEditId}"]`);
+  const t = texts.find(x => x.id === txEditId);
+  if (el && t) {
+    t.text = el.innerText.replace(/\n$/, "");   // drop the trailing-<br> artifact
+    el.contentEditable = "false";
+    el.classList.remove("editing");
+  }
+  txEditId = null;
+  renderTextList();      // refresh the row's textarea + timeline bar label
+  renderTextOverlays();  // normalize the overlay (size / box / time window)
+  saveState();
+}
+
+// Live-sync the edited text into the row + timeline without rebuilding the
+// layer (which would blow away the element being edited).
+els.textOverlayLayer.addEventListener("input", (e) => {
+  if (txEditId == null) return;
+  const el = e.target.closest(".tx-overlay");
+  if (!el) return;
+  const t = texts.find(x => x.id === txEditId);
+  if (!t) return;
+  t.text = el.innerText.replace(/\n$/, "");
+  const ta = els.textList.querySelector(`.text-row[data-id="${txEditId}"] textarea.tx-content`);
+  if (ta) { ta.value = t.text; ta.style.height = "auto"; ta.style.height = `${ta.scrollHeight}px`; }
+  renderTextTimeline();
+});
+els.textOverlayLayer.addEventListener("keydown", (e) => {
+  if (txEditId == null) return;
+  if (e.key === "Escape" || (e.key === "Enter" && !e.shiftKey)) {
+    e.preventDefault();
+    commitInlineEdit();
+  }
+});
+// Commit when focus leaves the editable label (focusout bubbles; blur doesn't).
+els.textOverlayLayer.addEventListener("focusout", () => {
+  if (txEditId != null) commitInlineEdit();
 });
 
 // Keep overlay font sizes correct when the player box resizes.
@@ -1529,6 +1817,7 @@ function textsPayload() {
       text: t.text, font: t.font, bold: !!t.bold, italic: !!t.italic,
       size_pct: t.sizePct, color: t.color,
       x: t.x, y: t.y, start: t.start, end: t.end, shadow: t.shadow !== false,
+      box: !!t.box, box_color: t.boxColor, box_opacity: t.boxOpacity, fade: t.fade,
     }));
 }
 
@@ -1547,6 +1836,7 @@ function currentProjectPayload(name) {
       text: t.text, font: t.font, bold: !!t.bold, italic: !!t.italic,
       sizePct: t.sizePct, color: t.color,
       x: t.x, y: t.y, start: t.start, end: t.end, shadow: t.shadow !== false,
+      box: !!t.box, boxColor: t.boxColor, boxOpacity: t.boxOpacity, fade: t.fade,
     })),
   };
 }

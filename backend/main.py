@@ -498,6 +498,10 @@ class TextOverlayModel(BaseModel):
     start: Optional[float] = Field(ge=0, default=None)
     end: Optional[float] = Field(ge=0, default=None)
     shadow: bool = True
+    box: bool = False
+    box_color: str = "#000000"
+    box_opacity: float = Field(ge=0, le=1, default=0.45)
+    fade: float = Field(ge=0, le=10, default=0.0)
 
 
 class RenderRequest(BaseModel):
@@ -593,6 +597,8 @@ async def start_render(req: RenderRequest) -> JSONResponse:
             text=t.text, font=t.font, bold=t.bold, italic=t.italic,
             size_pct=t.size_pct, color=t.color,
             x=t.x, y=t.y, start=t.start, end=t.end, shadow=t.shadow,
+            box=t.box, box_color=t.box_color, box_opacity=t.box_opacity,
+            fade=t.fade,
         )
         for t in req.texts if (t.text or "").strip()
     ][:20]

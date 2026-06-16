@@ -118,6 +118,10 @@ class TextOverlay:
     start: Optional[float] = None
     end: Optional[float] = None
     shadow: bool = True           # black outline for legibility
+    box: bool = False             # filled background box behind the text
+    box_color: str = "#000000"    # box fill color
+    box_opacity: float = 0.45     # box fill alpha (0..1)
+    fade: float = 0.0             # fade in/out duration in seconds (0 = hard cut)
 
 
 @dataclass
@@ -298,6 +302,27 @@ def _enable_expr(start: Optional[float], end: Optional[float],
     return ""
 
 
+def _fade_alpha_expr(start: Optional[float], end: Optional[float],
+                     offset: float, fade: float) -> str:
+    """drawtext `alpha` expression ramping in/out over `fade` seconds at the
+    edges of the time window. start/end are OUTPUT-relative seconds (intro
+    excluded); `offset` (= intro) shifts them onto the final timeline. A fade-
+    out is only added when `end` is set, since the total video length isn't
+    known here (an open-ended overlay just holds to the end). Commas live
+    inside the quoted option value (like `enable=`), so they need no escaping.
+    Returns '' when fade <= 0."""
+    if not fade or fade <= 0:
+        return ""
+    s = (start + offset) if start is not None else offset
+    e = (end + offset) if end is not None else None
+    fin = f"(t-{s:.3f})/{fade:.3f}"
+    if e is not None and (e - s) > fade:
+        ramp = f"min({fin},({e:.3f}-t)/{fade:.3f})"
+    else:
+        ramp = fin
+    return f"max(0,min(1,{ramp}))"
+
+
 def _build_text_filters(
     texts: List[TextOverlay], width: int, height: int, job_id: str,
     intro_offset: float = 0.0,
@@ -329,11 +354,21 @@ def _build_text_filters(
             f":x=w*{_clip01(t.x):.5f}-text_w/2"
             f":y=h*{_clip01(t.y):.5f}-text_h/2"
         )
+        if getattr(t, "box", False):
+            pad = max(4, round(fontsize * 0.3))
+            op = max(0.0, min(1.0, float(getattr(t, "box_opacity", 0.45) or 0.0)))
+            dt += f":box=1:boxcolor={_ff_color(t.box_color)}@{op:.3f}:boxborderw={pad}"
         if t.shadow:
-            dt += ":borderw=2:bordercolor=black@0.6"
+            # Scale the outline with the font so it stays visible at 1080p/1440p.
+            bw = max(2, round(fontsize * 0.06))
+            dt += f":borderw={bw}:bordercolor=black@0.6"
         en = _enable_expr(t.start, t.end, intro_offset)
         if en:
             dt += f":enable='{en}'"
+        al = _fade_alpha_expr(t.start, t.end, intro_offset,
+                              float(getattr(t, "fade", 0.0) or 0.0))
+        if al:
+            dt += f":alpha='{al}'"
         parts.append(dt)
     return ",".join(parts), files
 
