@@ -180,6 +180,50 @@
       <div id="textList" class="text-list"></div>
     </div>
 
+    <!-- Background music: one global track mixed onto the final output. Shown
+         only while Preview output is on, so you can audition the mix live
+         against the assembled video (like CapCut's audio track). -->
+    <div class="music-panel hidden" id="musicPanel">
+      <div class="text-header">
+        <h3>🎵 Background music</h3>
+        <button id="musicAuditionBtn" type="button" class="btn small" title="Listen to the track on its own">▶ Audition</button>
+      </div>
+      <p class="muted text-hint">
+        Mixed onto the final video. While previewing, the track plays in sync so you can
+        balance it against the original audio. <b>Loop</b> fills the whole output; <b>Duck</b>
+        auto-lowers the music under loud commentary/crowd.
+      </p>
+      <div class="music-row">
+        <label class="music-pick">
+          <span class="muted">Track</span>
+          <select id="musicTrack" title="Pick a background track"></select>
+        </label>
+        <label class="music-check"><input type="checkbox" id="musicLoop" checked> Loop to fill</label>
+        <label class="music-check"><input type="checkbox" id="musicDuck"> Duck under audio</label>
+      </div>
+      <div class="music-row">
+        <label class="music-slider">
+          <span class="muted">Music vol <b id="musicVolVal">35%</b></span>
+          <input type="range" id="musicVol" min="0" max="150" step="5" value="35">
+        </label>
+        <label class="music-slider">
+          <span class="muted">Original vol <b id="origVolVal">100%</b></span>
+          <input type="range" id="origVol" min="0" max="150" step="5" value="100">
+        </label>
+        <label class="music-num">
+          <span class="muted">Fade in (s)</span>
+          <input type="number" id="musicFadeIn" min="0" max="15" step="0.5" value="0">
+        </label>
+        <label class="music-num">
+          <span class="muted">Fade out (s)</span>
+          <input type="number" id="musicFadeOut" min="0" max="15" step="0.5" value="0">
+        </label>
+      </div>
+      <!-- Visual music lane: spans the whole output, with fade-in/out ramps. -->
+      <div id="musicLane" class="music-lane"><div class="music-lane-fill" id="musicLaneFill"></div></div>
+    </div>
+    <audio id="musicAudio" preload="auto"></audio>
+
     <div class="player-meta">
       <span class="muted" id="playerInfo">No video selected</span>
       <span class="muted" id="captureStatus"></span>

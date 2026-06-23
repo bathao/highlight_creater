@@ -20,6 +20,10 @@ workspace/jobs/*
 # Slow-motion audio asset (large binary; ship separately)
 sounds/*.mp3
 
+# Background-music library (large binaries; ship separately). Keep the credits.
+sounds/library/*
+!sounds/library/CREDITS.md
+
 # Editor / OS
 .vscode/
 .idea/

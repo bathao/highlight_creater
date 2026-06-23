@@ -45,8 +45,9 @@ OUT_DIR = ROOT / "workspace" / "output"
 TEMP_DIR = ROOT / "workspace" / "temp"
 SOUNDS_DIR = ROOT / "sounds"
 SLOWMO_AUDIO = SOUNDS_DIR / "slow_motion.mp3"
+MUSIC_DIR = SOUNDS_DIR / "library"   # background-music library (user-droppable)
 
-for d in (RAW_DIR, OUT_DIR, TEMP_DIR):
+for d in (RAW_DIR, OUT_DIR, TEMP_DIR, MUSIC_DIR):
     d.mkdir(parents=True, exist_ok=True)
 
 
@@ -125,6 +126,26 @@ class TextOverlay:
 
 
 @dataclass
+class MusicTrack:
+    """Background music mixed onto the FINAL output in a last audio pass.
+
+    `path` points at a file inside MUSIC_DIR. `volume`/`original_volume` are
+    linear gains (1.0 = unchanged). When the source has audio they are mixed
+    (amix, no auto-normalise); when it has none, only the music is laid down.
+    `loop` repeats the track to fill the whole video. `fade_in`/`fade_out` are
+    seconds. `duck` lowers the music whenever the original audio is loud
+    (sidechain compression) — the CapCut-style "auto" ducking.
+    """
+    path: Path
+    volume: float = 0.35
+    original_volume: float = 1.0
+    fade_in: float = 0.0
+    fade_out: float = 0.0
+    loop: bool = True
+    duck: bool = False
+
+
+@dataclass
 class RenderJob:
     job_id: str
     video_path: Path           # fallback source for clips without their own video_path
@@ -146,6 +167,9 @@ class RenderJob:
 
     # Text overlays burned onto the final video (empty = none).
     texts: List[TextOverlay] = field(default_factory=list)
+
+    # Background music mixed onto the final output (None = none).
+    music: Optional[MusicTrack] = None
 
     # progress state
     status: str = "pending"     # pending | running | done | error
@@ -757,6 +781,69 @@ def concat_with_text(segments: List[Path], out_path: Path, text_vf: str,
     _run_ffmpeg(args, expected_duration, on_progress, cancel)
 
 
+def mix_background_music(video_in: Path, out_path: Path, music: "MusicTrack",
+                         video_has_audio: bool, total_duration: float,
+                         on_progress: Callable[[float], None],
+                         cancel: threading.Event) -> None:
+    """Final pass: lay a background-music track over the finished video.
+
+    Video is stream-copied (no re-encode — fast remux); only audio is built.
+    The music is an extra input (looped via -stream_loop when requested) and
+    mixed with the original audio through amix (normalize=0 so the requested
+    gains are honoured). With ducking, the music is side-chain compressed by
+    the original audio so commentary/crowd stays on top. When the source has
+    no audio, only the (faded, looped) music is written."""
+    mv = f"{max(0.0, music.volume):.4f}"
+    ov = f"{max(0.0, music.original_volume):.4f}"
+
+    # Music post-gain fades. fade-out is anchored to the known total length.
+    fades = []
+    if music.fade_in > 0.01:
+        fades.append(f"afade=t=in:st=0:d={music.fade_in:.3f}")
+    if music.fade_out > 0.01 and total_duration > music.fade_out:
+        st = max(0.0, total_duration - music.fade_out)
+        fades.append(f"afade=t=out:st={st:.3f}:d={music.fade_out:.3f}")
+    music_chain = f"[1:a]volume={mv}" + ("," + ",".join(fades) if fades else "") + "[m]"
+
+    if video_has_audio:
+        if music.duck:
+            # Split the original into a mix copy + a sidechain key; the key
+            # compresses the music so it dips under loud original audio.
+            fc = (
+                f"[0:a]volume={ov},asplit=2[oa][key];"
+                f"{music_chain};"
+                f"[m][key]sidechaincompress=threshold=0.03:ratio=8:attack=20:release=400[mc];"
+                f"[oa][mc]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[a]"
+            )
+        else:
+            fc = (
+                f"[0:a]volume={ov}[oa];{music_chain};"
+                f"[oa][m]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[a]"
+            )
+    else:
+        # No original audio: the music IS the soundtrack (cut to video length).
+        fc = music_chain.replace("[m]", "[a]")
+
+    args = [
+        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+        "-progress", "pipe:1", "-nostats",
+        "-i", str(video_in),
+    ]
+    if music.loop:
+        args += ["-stream_loop", "-1"]
+    args += [
+        "-i", str(music.path),
+        "-filter_complex", fc,
+        "-map", "0:v:0", "-map", "[a]",
+        "-c:v", "copy",
+        *AAC_ARGS,
+        "-shortest",
+        "-movflags", "+faststart",
+        str(out_path),
+    ]
+    _run_ffmpeg(args, total_duration, on_progress, cancel)
+
+
 # --------------------------------------------------------------------------
 # Top-level job runner
 # --------------------------------------------------------------------------
@@ -830,7 +917,12 @@ def run_job(job: RenderJob) -> None:
         segs_total = sum([intro_weight] + real_weights + slow_weights)
         concat_weight = segs_total * (0.6 if text_vf else 0.05)  # re-encode vs -c copy
 
-        total = intro_weight + sum(real_weights) + sum(slow_weights) + concat_weight
+        # Optional background-music pass (final). Audio-only re-encode + video
+        # stream-copy, so it's cheap relative to the segment work.
+        has_music = job.music is not None and Path(job.music.path).is_file()
+        music_weight = segs_total * 0.08 if has_music else 0.0
+
+        total = intro_weight + sum(real_weights) + sum(slow_weights) + concat_weight + music_weight
         if total <= 0:
             total = 1.0
         completed = 0.0
@@ -885,12 +977,16 @@ def run_job(job: RenderJob) -> None:
         out_name = f"{safe_name}_{ts}.mp4"
         out_path = OUT_DIR / out_name
 
+        # When music is added, the video is first assembled into a temp file and
+        # the music is laid down in a final pass that writes out_path.
+        video_target = (TEMP_DIR / f"{job.job_id}_premusic.mp4") if has_music else out_path
+
         if text_vf:
             # Text overlays present: re-encode (concat + drawtext) in one pass.
             # Works for a single segment too (concat of one file is fine).
             job.stage = "text"
             job.message = "Adding text overlays..."
-            concat_with_text(segments, out_path, text_vf, need_audio,
+            concat_with_text(segments, video_target, text_vf, need_audio,
                              _expected_total_duration(job),
                              stage_progress(concat_weight),
                              job.cancel)
@@ -899,15 +995,28 @@ def run_job(job: RenderJob) -> None:
             # rename instead of running concat.
             job.stage = "finalising"
             job.message = "Saving output..."
-            shutil.move(str(segments[0]), str(out_path))
+            shutil.move(str(segments[0]), str(video_target))
         else:
             job.stage = "concat"
             job.message = "Stitching final video..."
-            concat_segments(segments, out_path,
+            concat_segments(segments, video_target,
                             _expected_total_duration(job),
                             stage_progress(concat_weight),
                             job.cancel)
         completed += concat_weight
+
+        # 4. Background music (final audio pass over the assembled video).
+        if has_music:
+            if job.cancel.is_set():
+                raise RuntimeError("Cancelled")
+            job.stage = "music"
+            job.message = "Mixing background music..."
+            mix_background_music(video_target, out_path, job.music, need_audio,
+                                 _expected_total_duration(job),
+                                 stage_progress(music_weight),
+                                 job.cancel)
+            completed += music_weight
+            Path(video_target).unlink(missing_ok=True)
 
         job.percent = 100.0
         job.status = "done"

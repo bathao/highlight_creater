@@ -57,6 +57,21 @@ const els = {
   textCount: $("textCount"),
   addTextBtn: $("addTextBtn"),
 
+  // Background music
+  musicPanel: $("musicPanel"),
+  musicAudio: $("musicAudio"),
+  musicTrack: $("musicTrack"),
+  musicAuditionBtn: $("musicAuditionBtn"),
+  musicVol: $("musicVol"),
+  musicVolVal: $("musicVolVal"),
+  origVol: $("origVol"),
+  origVolVal: $("origVolVal"),
+  musicFadeIn: $("musicFadeIn"),
+  musicFadeOut: $("musicFadeOut"),
+  musicLoop: $("musicLoop"),
+  musicDuck: $("musicDuck"),
+  musicLaneFill: $("musicLaneFill"),
+
   // Project save/load
   projectName: $("projectName"),
   projectSelect: $("projectSelect"),
@@ -114,6 +129,16 @@ let nextTextId = 1;
 let selectedTextId = null;
 let txEditId = null;   // id of the overlay being edited inline (null = none)
 
+// Background music mixed onto the final output (one global track). volume and
+// originalVolume are linear gains (1.0 = unchanged). Persisted + sent to the
+// render. `track` is a filename in the server's music library ("" = none).
+let music = {
+  track: "", volume: 0.35, originalVolume: 1.0,
+  fadeIn: 0, fadeOut: 0, loop: true, duck: false,
+};
+let musicTracks = [];        // [{file,name,url,duration,size_mb}] from /api/music
+let musicAuditioning = false; // standalone "Audition" playback is active
+
 // Curated font families — keys match backend FONT_FAMILIES. `noStyle` marks
 // families without bold/italic variants (Impact) so those toggles disable.
 const FONT_OPTIONS = [
@@ -163,6 +188,7 @@ function saveState() {
       currentVideo,
       clips,
       texts,
+      music,
     }));
   } catch (e) { /* ignore */ }
 }
@@ -192,7 +218,23 @@ function loadState() {
       texts = s.texts.map(normalizeText);
       nextTextId = Math.max(0, ...texts.map(t => t.id || 0)) + 1;
     }
+    if (s.music) music = normalizeMusic(s.music);
   } catch (e) { /* ignore */ }
+}
+
+// Coerce a stored/loaded music config into the canonical shape with safe
+// defaults (backward-compatible: missing fields fall back).
+function normalizeMusic(m) {
+  m = m || {};
+  return {
+    track: typeof m.track === "string" ? m.track : "",
+    volume: clampNum(m.volume, 0, 2, 0.35),
+    originalVolume: clampNum(m.originalVolume, 0, 2, 1.0),
+    fadeIn: clampNum(m.fadeIn, 0, 15, 0),
+    fadeOut: clampNum(m.fadeOut, 0, 15, 0),
+    loop: m.loop !== false,
+    duck: !!m.duck,
+  };
 }
 
 // Coerce a stored/loaded overlay into the canonical shape with safe defaults.
@@ -561,8 +603,8 @@ els.player.addEventListener("durationchange", () => {
   updatePlayerTime();
 });
 els.player.addEventListener("progress", updateBuffered);
-els.player.addEventListener("play",  () => { updatePlayBtn(); pvSyncPlayBtn(); syncTextOverlayTiming(); if (pvMode) pvArmWatchdog(pvPlan[pvPos]); });
-els.player.addEventListener("pause", () => { updatePlayBtn(); pvSyncPlayBtn(); syncTextOverlayTiming(); if (pvWatchdog) { clearTimeout(pvWatchdog); pvWatchdog = null; } });
+els.player.addEventListener("play",  () => { updatePlayBtn(); pvSyncPlayBtn(); syncTextOverlayTiming(); syncMusicPlayback(); if (pvMode) pvArmWatchdog(pvPlan[pvPos]); });
+els.player.addEventListener("pause", () => { updatePlayBtn(); pvSyncPlayBtn(); syncTextOverlayTiming(); syncMusicPlayback(); if (pvWatchdog) { clearTimeout(pvWatchdog); pvWatchdog = null; } });
 els.player.addEventListener("ended", () => { updatePlayBtn(); pvSyncPlayBtn(); syncTextOverlayTiming(); });
 // Extra safety nets so the play/pause icon always matches reality, even when a
 // state change rides in on a seek/stall rather than a clean play/pause event.
@@ -1027,6 +1069,8 @@ function pvEnter() {
   pvMode = true;
   els.previewBar.classList.remove("hidden");
   els.textPanel.classList.remove("hidden");   // text editor lives in the preview context
+  els.musicPanel.classList.remove("hidden");  // music strip too — audition the mix here
+  renderMusicPanel();
   els.previewOutputBtn.classList.add("active");
   els.previewOutputBtn.textContent = "■ Stop preview";
   els.timeline.classList.add("pv-disabled");   // raw scrubber off; use the output timeline
@@ -1045,6 +1089,12 @@ function pvExit() {
   els.player.playbackRate = parseFloat(els.speedSelect.value) || 1;
   els.previewBar.classList.add("hidden");
   els.textPanel.classList.add("hidden");
+  els.musicPanel.classList.add("hidden");
+  // Stop any music audition and restore the player's own audio level.
+  musicAuditioning = false;
+  if (els.musicAudio) els.musicAudio.pause();
+  els.player.volume = 1;
+  updateAuditionBtn();
   els.previewOutputBtn.classList.remove("active");
   els.previewOutputBtn.textContent = "▶ Preview output";
   els.timeline.classList.remove("pv-disabled");
@@ -1184,10 +1234,200 @@ function pvUpdateBar() {
   els.pvPrev.disabled = pvPos === 0;
   els.pvNext.disabled = pvPos + 1 >= pvPlan.length;
   syncTextOverlayTiming();
+  syncMusicPlayback();
 }
 
 function pvSyncPlayBtn() {
   els.pvPlay.textContent = els.player.paused ? "▶" : "❚❚";
+}
+
+// ---- Background music ----------------------------------------------
+// One global track mixed onto the final output. The strip lives in the
+// preview context (like the text panel); while previewing, the track is
+// slaved to the assembled output so the mix can be auditioned live.
+
+async function loadMusicLibrary() {
+  try {
+    const res = await fetch("/api/music");
+    const data = await res.json();
+    musicTracks = Array.isArray(data.tracks) ? data.tracks : [];
+  } catch (e) { musicTracks = []; }
+  // Drop a stored selection whose file was removed from the library.
+  if (music.track && !musicTracks.some(t => t.file === music.track)) music.track = "";
+  renderMusicPanel();
+  refreshRenderSummary();
+}
+
+function selectedTrack() { return musicTracks.find(t => t.file === music.track) || null; }
+
+// Estimated output duration in seconds (intro excluded — matches the preview
+// timeline). Used to draw the music lane's fade ramps when not previewing.
+function outputDurationSecs() {
+  if (pvMode && pvTotal) return pvTotal;
+  const factor = 100 / (parseInt(els.slowSlider.value, 10) || 50);
+  let total = 0;
+  clips.forEach(c => {
+    const d = Math.max(0, c.end - c.start);
+    total += d + (c.slowmo !== false ? d * factor : 0);
+  });
+  return total;
+}
+
+function renderMusicPanel() {
+  const sel = els.musicTrack;
+  if (sel) {
+    sel.innerHTML = "";
+    const none = document.createElement("option");
+    none.value = ""; none.textContent = "— No music —";
+    sel.appendChild(none);
+    musicTracks.forEach(t => {
+      const o = document.createElement("option");
+      o.value = t.file;
+      o.textContent = t.name + (t.duration ? ` (${fmtClock(t.duration)})` : "");
+      sel.appendChild(o);
+    });
+    sel.value = music.track || "";
+  }
+  if (els.musicVol) { els.musicVol.value = Math.round(music.volume * 100); els.musicVolVal.textContent = `${Math.round(music.volume * 100)}%`; }
+  if (els.origVol) { els.origVol.value = Math.round(music.originalVolume * 100); els.origVolVal.textContent = `${Math.round(music.originalVolume * 100)}%`; }
+  if (els.musicFadeIn) els.musicFadeIn.value = music.fadeIn;
+  if (els.musicFadeOut) els.musicFadeOut.value = music.fadeOut;
+  if (els.musicLoop) els.musicLoop.checked = music.loop;
+  if (els.musicDuck) els.musicDuck.checked = music.duck;
+
+  // Keep the <audio> element's source in step with the chosen track. Guard on
+  // the *resolved* track (empty until the library has loaded) so the src is set
+  // once the track actually exists, not prematurely when only the id is known.
+  const tr = selectedTrack();
+  const a = els.musicAudio;
+  if (a) {
+    const wantTrack = tr ? music.track : "";
+    if ((a.getAttribute("data-track") || "") !== wantTrack) {
+      a.src = tr ? encodeURI(tr.url) : "";
+      a.setAttribute("data-track", wantTrack);
+      musicAuditioning = false;
+    }
+    a.loop = music.loop;
+  }
+  renderMusicLane();
+  updateAuditionBtn();
+}
+
+function renderMusicLane() {
+  const fill = els.musicLaneFill;
+  if (!fill) return;
+  const tr = selectedTrack();
+  if (!tr) {
+    fill.className = "music-lane-fill empty";
+    fill.style.background = "";
+    fill.textContent = "No music — pick a track to add a soundtrack";
+    return;
+  }
+  fill.className = "music-lane-fill";
+  const total = outputDurationSecs();
+  const fi = total > 0 ? Math.min(0.45, music.fadeIn / total) : 0;
+  const fo = total > 0 ? Math.min(0.45, music.fadeOut / total) : 0;
+  const a = (fi * 100).toFixed(1), b = (100 - fo * 100).toFixed(1);
+  fill.style.background =
+    `linear-gradient(90deg, rgba(56,139,253,0.12) 0%, #388bfd ${a}%, #1f6feb ${b}%, rgba(31,111,235,0.12) 100%)`;
+  fill.textContent = `${tr.name}${music.loop ? " · loops" : ""}${music.duck ? " · duck" : ""}`;
+}
+
+function updateAuditionBtn() {
+  if (!els.musicAuditionBtn) return;
+  els.musicAuditionBtn.disabled = !selectedTrack();
+  els.musicAuditionBtn.textContent = musicAuditioning ? "■ Stop" : "▶ Audition";
+}
+
+// Standalone "listen to the track" toggle (pauses the video to avoid double audio).
+function toggleAudition() {
+  const a = els.musicAudio;
+  if (!selectedTrack() || !a) { flashTopMessage("Pick a music track first"); return; }
+  if (musicAuditioning) {
+    musicAuditioning = false;
+    a.pause();
+  } else {
+    if (pvMode && !els.player.paused) els.player.pause();
+    musicAuditioning = true;
+    a.loop = music.loop;
+    a.volume = Math.min(1, music.volume);
+    try { a.currentTime = 0; } catch (e) { /* not seekable yet */ }
+    a.play().catch(() => {});
+  }
+  updateAuditionBtn();
+}
+
+// Slave the music element to the preview output while previewing + playing, so
+// the mix is heard live. Also applies the original-audio gain to the player.
+// Called from pvUpdateBar (frequent) and the play/pause handlers.
+function syncMusicPlayback() {
+  const a = els.musicAudio;
+  if (!a) return;
+  els.player.volume = pvMode ? Math.min(1, music.originalVolume) : 1;
+  if (musicAuditioning) { a.volume = Math.min(1, music.volume); return; }
+  const tr = selectedTrack();
+  if (!pvMode || !tr) { if (!a.paused) a.pause(); return; }
+  a.volume = Math.min(1, music.volume);
+  a.loop = music.loop;
+  if (els.player.paused) { if (!a.paused) a.pause(); return; }
+  const dur = a.duration || tr.duration || 0;
+  let t = pvOutputPos();
+  if (dur > 0) t = music.loop ? (t % dur) : Math.min(t, dur - 0.05);
+  if (t >= 0 && Math.abs((a.currentTime || 0) - t) > 0.35) {
+    try { a.currentTime = t; } catch (e) { /* ignore */ }
+  }
+  if (a.paused && (music.loop || (a.currentTime || 0) < dur)) a.play().catch(() => {});
+}
+
+// Map the music config to the render payload (null = no music).
+function musicPayload() {
+  if (!music.track) return null;
+  return {
+    track: music.track,
+    volume: music.volume,
+    original_volume: music.originalVolume,
+    fade_in: music.fadeIn,
+    fade_out: music.fadeOut,
+    loop: music.loop,
+    duck: music.duck,
+  };
+}
+
+// Wire the music controls (called once at init).
+function wireMusicControls() {
+  if (els.musicTrack) els.musicTrack.addEventListener("change", () => {
+    music.track = els.musicTrack.value || "";
+    musicAuditioning = false;
+    renderMusicPanel();
+    saveState(); refreshRenderSummary(); syncMusicPlayback();
+  });
+  if (els.musicAuditionBtn) els.musicAuditionBtn.addEventListener("click", toggleAudition);
+  if (els.musicVol) els.musicVol.addEventListener("input", () => {
+    music.volume = (parseInt(els.musicVol.value, 10) || 0) / 100;
+    els.musicVolVal.textContent = `${Math.round(music.volume * 100)}%`;
+    saveState(); syncMusicPlayback();
+  });
+  if (els.origVol) els.origVol.addEventListener("input", () => {
+    music.originalVolume = (parseInt(els.origVol.value, 10) || 0) / 100;
+    els.origVolVal.textContent = `${Math.round(music.originalVolume * 100)}%`;
+    saveState(); syncMusicPlayback();
+  });
+  if (els.musicFadeIn) els.musicFadeIn.addEventListener("change", () => {
+    music.fadeIn = clampNum(parseFloat(els.musicFadeIn.value), 0, 15, 0);
+    els.musicFadeIn.value = music.fadeIn; renderMusicLane(); saveState();
+  });
+  if (els.musicFadeOut) els.musicFadeOut.addEventListener("change", () => {
+    music.fadeOut = clampNum(parseFloat(els.musicFadeOut.value), 0, 15, 0);
+    els.musicFadeOut.value = music.fadeOut; renderMusicLane(); saveState();
+  });
+  if (els.musicLoop) els.musicLoop.addEventListener("change", () => {
+    music.loop = els.musicLoop.checked;
+    if (els.musicAudio) els.musicAudio.loop = music.loop;
+    renderMusicLane(); saveState(); syncMusicPlayback();
+  });
+  if (els.musicDuck) els.musicDuck.addEventListener("change", () => {
+    music.duck = els.musicDuck.checked; renderMusicLane(); saveState();
+  });
 }
 
 // ---- Text overlays --------------------------------------------------
@@ -1810,8 +2050,10 @@ function refreshRenderSummary() {
   const srcLabel = sources.length > 1 ? ` • <b>${sources.length}</b> source videos` : "";
   const txtCount = texts.filter(t => (t.text || "").trim()).length;
   const txtLabel = txtCount ? ` • <b>${txtCount}</b> text` : "";
+  const mTrack = selectedTrack();
+  const musicLabel = (music.track && mTrack) ? ` • 🎵 <b>${mTrack.name}</b>` : "";
   els.renderSummary.innerHTML = `
-    <b>${clips.length}</b> events (<b>${slowCount}</b> with slow-mo ${slow}%, ${factor.toFixed(2)}×)${srcLabel}${txtLabel} •
+    <b>${clips.length}</b> events (<b>${slowCount}</b> with slow-mo ${slow}%, ${factor.toFixed(2)}×)${srcLabel}${txtLabel}${musicLabel} •
     intro <b>${intro}s</b> →
     real <b>${fmtClock(totalReal)}</b> + slow-mo <b>${fmtClock(totalSlow)}</b> =
     output ≈ <b>${fmtClock(totalOut)}</b> @ <b>${resShortLabel(outHeight)}</b>
@@ -1847,6 +2089,7 @@ function currentProjectPayload(name) {
       x: t.x, y: t.y, start: t.start, end: t.end, shadow: t.shadow !== false,
       box: !!t.box, boxColor: t.boxColor, boxOpacity: t.boxOpacity, fade: t.fade,
     })),
+    music: { ...music },
   };
 }
 
@@ -1870,6 +2113,9 @@ function applyProjectPayload(p) {
   // Text overlays (old projects without `texts` -> none).
   texts = (p.texts || []).map(normalizeText);
   selectedTextId = null;
+  // Background music (old projects without `music` -> none).
+  music = normalizeMusic(p.music);
+  renderMusicPanel();
   renderTextList();
   // Loading a project is a fresh context — leave preview and drop undo history.
   if (pvMode) pvExit();
@@ -2067,6 +2313,7 @@ async function startRender() {
       player2: els.player2.value,
       out_height: outHeight || 0,
       texts: textsPayload(),
+      music: musicPayload(),
     };
     const res = await fetch("/api/render", {
       method: "POST",
@@ -2260,12 +2507,15 @@ document.addEventListener("keydown", (e) => {
   updateSlowLabel();
   renderClipsTable();
   renderTextList();
+  wireMusicControls();
+  renderMusicPanel();
   updatePlayBtn();
   updatePickLabel();
   updateUndoBtn();
   // Restore the last-used source video into the player, if any.
   if (currentVideo) selectVideo(currentVideo);
   await loadProjectList();
+  loadMusicLibrary();   // fetch the library, then refresh the summary
   refreshResolutionOptions();
   refreshRenderSummary();
 })();

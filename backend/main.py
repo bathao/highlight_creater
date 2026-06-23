@@ -33,10 +33,12 @@ ROOT = Path(__file__).resolve().parent.parent
 FRONTEND_DIR = ROOT / "frontend"
 RAW_DIR = render.RAW_DIR
 OUT_DIR = render.OUT_DIR
+MUSIC_DIR = render.MUSIC_DIR
 PROJ_DIR = ROOT / "workspace" / "projects"
 PROJ_DIR.mkdir(parents=True, exist_ok=True)
 
 VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".m4v", ".avi", ".webm"}
+AUDIO_EXTS = {".mp3", ".m4a", ".aac", ".wav", ".ogg", ".flac", ".opus"}
 CHUNK_SIZE = 1024 * 1024  # 1 MB chunks for byte-range streaming
 PROJECT_NAME_RE = re.compile(r"^[A-Za-z0-9 _\-\.]{1,80}$")
 
@@ -47,6 +49,8 @@ app = FastAPI(title="Highlight Creator")
 # Static frontend
 # --------------------------------------------------------------------------
 app.mount("/static", StaticFiles(directory=str(FRONTEND_DIR)), name="static")
+# Background-music library, served for in-browser audition during Preview.
+app.mount("/music-files", StaticFiles(directory=str(MUSIC_DIR)), name="music")
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -79,6 +83,23 @@ async def list_videos() -> JSONResponse:
                     "size_mb": round(p.stat().st_size / (1024 * 1024), 1),
                 })
     return JSONResponse({"videos": items, "raw_dir": str(RAW_DIR)})
+
+
+@app.get("/api/music")
+async def list_music() -> JSONResponse:
+    """List background-music tracks available in the library folder."""
+    items = []
+    if MUSIC_DIR.exists():
+        for p in sorted(MUSIC_DIR.iterdir(), key=lambda x: x.name.lower()):
+            if p.is_file() and p.suffix.lower() in AUDIO_EXTS:
+                items.append({
+                    "file": p.name,
+                    "name": _prettify_music_name(p.name),
+                    "url": f"/music-files/{p.name}",
+                    "duration": _audio_duration(p),
+                    "size_mb": round(p.stat().st_size / (1024 * 1024), 1),
+                })
+    return JSONResponse({"tracks": items, "music_dir": str(MUSIC_DIR)})
 
 
 @app.get("/api/probe/{filename}")
@@ -136,6 +157,50 @@ def _safe_output_path(filename: str) -> Path:
     if not p.is_file():
         raise HTTPException(404, "Not found")
     return p
+
+
+def _safe_music_path(filename: str) -> Path:
+    """Resolve a background-music file to its sandboxed path inside MUSIC_DIR.
+    Only a bare filename is accepted (no directories / traversal)."""
+    filename = (filename or "").strip()
+    if not filename or "/" in filename or "\\" in filename or filename.startswith("."):
+        raise HTTPException(400, "Invalid music file")
+    p = (MUSIC_DIR / filename).resolve()
+    if p.parent != MUSIC_DIR.resolve():
+        raise HTTPException(400, "Invalid music file")
+    if not p.is_file() or p.suffix.lower() not in AUDIO_EXTS:
+        raise HTTPException(404, "Music file not found")
+    return p
+
+
+def _prettify_music_name(filename: str) -> str:
+    """Turn a library filename into a friendly display title.
+    e.g. 'the_mountain-instrumental-electronic-522467.mp3' -> 'The Mountain · Electronic'."""
+    stem = Path(filename).stem
+    tokens = [t for t in re.split(r"[-_\s]+", stem) if t]
+    keep = []
+    for t in tokens:
+        if t.isdigit() and len(t) >= 4:  # drop long numeric ids (e.g. Pixabay 548629)
+            continue
+        if t.lower() == "instrumental":  # drop generic filler
+            continue
+        keep.append(t)
+    if not keep:
+        keep = [stem]
+    # Title-case but keep all-caps/short tokens (e.g. "8", "EDM") intact.
+    return " ".join(w if (w.isupper() or w.isdigit()) else w.capitalize() for w in keep)
+
+
+def _audio_duration(path: Path) -> float:
+    try:
+        out = subprocess.check_output(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=nw=1:nk=1", str(path)],
+            stderr=subprocess.STDOUT, timeout=15,
+        )
+        return round(float(out.strip()), 2)
+    except Exception:
+        return 0.0
 
 
 def _stream_file(path: Path, request: Request) -> Response:
@@ -504,6 +569,16 @@ class TextOverlayModel(BaseModel):
     fade: float = Field(ge=0, le=10, default=0.0)
 
 
+class MusicModel(BaseModel):
+    track: str = ""                                          # filename in MUSIC_DIR ("" = no music)
+    volume: float = Field(ge=0, le=2, default=0.35)          # music gain (linear)
+    original_volume: float = Field(ge=0, le=2, default=1.0)  # original-audio gain
+    fade_in: float = Field(ge=0, le=15, default=0.0)
+    fade_out: float = Field(ge=0, le=15, default=0.0)
+    loop: bool = True
+    duck: bool = False
+
+
 class RenderRequest(BaseModel):
     video: str = ""  # fallback source for clips that don't specify their own
     clips: List[ClipModel]
@@ -514,6 +589,7 @@ class RenderRequest(BaseModel):
     player2: str = ""
     out_height: int = Field(ge=0, le=2160, default=0)  # 0 = native source height
     texts: List[TextOverlayModel] = Field(default_factory=list, max_length=20)
+    music: Optional[MusicModel] = None
 
 
 class ExportClipRequest(BaseModel):
@@ -603,6 +679,20 @@ async def start_render(req: RenderRequest) -> JSONResponse:
         for t in req.texts if (t.text or "").strip()
     ][:20]
 
+    # Background music (optional): resolve + sandbox the chosen track.
+    music = None
+    if req.music and (req.music.track or "").strip():
+        music_path = _safe_music_path(req.music.track)
+        music = render.MusicTrack(
+            path=music_path,
+            volume=req.music.volume,
+            original_volume=req.music.original_volume,
+            fade_in=req.music.fade_in,
+            fade_out=req.music.fade_out,
+            loop=req.music.loop,
+            duck=req.music.duck,
+        )
+
     # video_path on the job is just a fallback; use the first clip's source.
     job = render.RenderJob(
         job_id=uuid.uuid4().hex[:12],
@@ -615,6 +705,7 @@ async def start_render(req: RenderRequest) -> JSONResponse:
         player2=req.player2,
         out_height=req.out_height,
         texts=texts,
+        music=music,
     )
     render.register_job(job)
 
