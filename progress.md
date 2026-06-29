@@ -1,6 +1,6 @@
 # Highlight Creator — Project Status
 
-> Updated: 2026-06-23 (v1.6 — background music on the final output: a royalty-free music library, a music strip in the Preview context with live audition synced to the assembled output, music/original volume, fade in/out, loop-to-fill, and CapCut-style auto-ducking. Committed `2e562a1` on `master`; automated E2E passed; **manual UI test pending 2026-06-24**)
+> Updated: 2026-06-29 (v1.6 — background music on the final output: a royalty-free music library, a music strip in the Preview context with live audition synced to the assembled output, music/original volume, fade in/out, loop-to-fill, and CapCut-style auto-ducking. Committed `2e562a1` on `master`; automated E2E passed; **manual UI test PASSED 2026-06-29** — all 8 checklist steps verified)
 > Previous: 2026-06-16 (v1.5 — richer text editing: per-text Start/End sliders, background box, fade in/out, scalable outline, 9-cell position pad + centre snap, duplicate, multi-line, inline edit on the player; plus a smoother preview output timeline. Commits `e18f0b1`, `5cd6ca4` on `master`; no git remote configured)
 > Earlier: 2026-06-16 (v1.4 — text overlays burned into the final video, with a CapCut-style output timeline, committed `6db33b8`; docs `024fd67`)
 > Earlier: 2026-06-15 (v1.3 — preview output playback + drag-and-drop event reordering, commit `8c80dd7`)
@@ -175,7 +175,7 @@ start.bat
 
 Open http://127.0.0.1:8770, click **Choose source video…** to pick footage from any drive/folder, mark in/out (keys **I**/**O**), then click **Export highlight video**.
 
-### v1.6 background-music — manual test checklist (pending 2026-06-24)
+### v1.6 background-music — manual test checklist (✅ PASSED 2026-06-29 — all 8 steps verified)
 First: **hard-refresh the browser** (Ctrl+Shift+R) so the new frontend loads (backend auto-reloads via `--reload`).
 1. **Library loads** — `GET /api/music` lists tracks; names look clean (no `-instrumental-519455`).
 2. **Strip shows in Preview** — turn on **▶ Preview output**; the 🎵 Background music strip appears under the text panel.

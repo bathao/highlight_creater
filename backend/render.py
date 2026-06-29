@@ -172,7 +172,7 @@ class RenderJob:
     music: Optional[MusicTrack] = None
 
     # progress state
-    status: str = "pending"     # pending | running | done | error
+    status: str = "pending"     # pending | running | done | error | cancelled
     percent: float = 0.0
     stage: str = ""
     message: str = ""
@@ -1025,9 +1025,15 @@ def run_job(job: RenderJob) -> None:
         job.output_file = out_name
 
     except Exception as e:  # noqa: BLE001
-        job.status = "error"
-        job.error = str(e)
-        job.message = f"Error: {e}"
+        if job.cancel.is_set():
+            # User-initiated cancel — a clean stop, not a failure.
+            job.status = "cancelled"
+            job.stage = "cancelled"
+            job.message = "Cancelled."
+        else:
+            job.status = "error"
+            job.error = str(e)
+            job.message = f"Error: {e}"
     finally:
         # Always clean temp files belonging to this job
         try:

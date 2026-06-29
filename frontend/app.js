@@ -62,6 +62,7 @@ const els = {
   musicAudio: $("musicAudio"),
   musicTrack: $("musicTrack"),
   musicAuditionBtn: $("musicAuditionBtn"),
+  musicClearBtn: $("musicClearBtn"),
   musicVol: $("musicVol"),
   musicVolVal: $("musicVolVal"),
   origVol: $("origVol"),
@@ -76,6 +77,7 @@ const els = {
   projectName: $("projectName"),
   projectSelect: $("projectSelect"),
   saveProjectBtn: $("saveProjectBtn"),
+  newProjectBtn: $("newProjectBtn"),
   loadProjectBtn: $("loadProjectBtn"),
   deleteProjectBtn: $("deleteProjectBtn"),
 
@@ -1334,6 +1336,7 @@ function renderMusicLane() {
 }
 
 function updateAuditionBtn() {
+  if (els.musicClearBtn) els.musicClearBtn.classList.toggle("hidden", !music.track);
   if (!els.musicAuditionBtn) return;
   els.musicAuditionBtn.disabled = !selectedTrack();
   els.musicAuditionBtn.textContent = musicAuditioning ? "■ Stop" : "▶ Audition";
@@ -1355,6 +1358,17 @@ function toggleAudition() {
     a.play().catch(() => {});
   }
   updateAuditionBtn();
+}
+
+// Clear the chosen track (the "Remove music" button). Mirrors picking
+// "— No music —", but as one obvious click. Stops any audition first.
+function clearMusic() {
+  if (musicAuditioning && els.musicAudio) els.musicAudio.pause();
+  musicAuditioning = false;
+  music.track = "";
+  renderMusicPanel();
+  saveState(); refreshRenderSummary(); syncMusicPlayback();
+  flashTopMessage("Background music removed.");
 }
 
 // Slave the music element to the preview output while previewing + playing, so
@@ -1402,6 +1416,7 @@ function wireMusicControls() {
     saveState(); refreshRenderSummary(); syncMusicPlayback();
   });
   if (els.musicAuditionBtn) els.musicAuditionBtn.addEventListener("click", toggleAudition);
+  if (els.musicClearBtn) els.musicClearBtn.addEventListener("click", clearMusic);
   if (els.musicVol) els.musicVol.addEventListener("input", () => {
     music.volume = (parseInt(els.musicVol.value, 10) || 0) / 100;
     els.musicVolVal.textContent = `${Math.round(music.volume * 100)}%`;
@@ -2190,6 +2205,49 @@ async function saveProject() {
   }
 }
 
+// Start from scratch: wipe every per-project field (events, text, music) and
+// disconnect the source video, so a fresh session has nothing carried over from
+// the previous project / the persisted localStorage state.
+function newProject() {
+  const hasWork = clips.length || texts.length || music.track || currentVideo;
+  if (hasWork && !confirm("Start a new project? This clears the current events, text overlays, music and source video. (Save first if you want to keep them.)")) return;
+
+  if (pvMode) pvExit();
+
+  // Setup fields back to their defaults.
+  els.tournament.value = "";
+  els.player1.value = "";
+  els.player2.value = "";
+  els.introSeconds.value = 4;
+  els.slowSlider.value = 50; updateSlowLabel();
+  outHeight = 0;
+
+  // Clear all per-project collections.
+  clips = [];
+  texts = []; selectedTextId = null; txEditId = null;
+  music = normalizeMusic({});
+  musicAuditioning = false;
+  clipUndoStack = [];
+
+  // Project name + selection.
+  els.projectName.value = "";
+  els.projectSelect.value = "";
+  updateProjectButtons();
+
+  // Disconnect the source video (also re-renders overlays / resolution list).
+  selectVideo("");
+
+  // Repaint everything that depends on the cleared state.
+  renderMusicPanel();
+  renderTextList();
+  renderClipsTable();
+  refreshResolutionOptions();
+  updateUndoBtn();
+  refreshRenderSummary();
+  saveState();
+  flashTopMessage("Started a new project.");
+}
+
 async function loadProject() {
   const name = els.projectSelect.value;
   if (!name) return;
@@ -2243,6 +2301,7 @@ async function exportSingleClip(clip, includeSlowmo) {
     return;
   }
   els.renderBtn.disabled = true;
+  els.cancelBtn.disabled = false;
   els.progressBox.classList.remove("hidden");
   els.resultBox.classList.add("hidden");
   els.progressFill.style.width = "0%";
@@ -2295,9 +2354,11 @@ async function startRender() {
     }
   }
   els.renderBtn.disabled = true;
+  els.cancelBtn.disabled = false;
   els.progressBox.classList.remove("hidden");
   els.resultBox.classList.add("hidden");
   els.progressFill.style.width = "0%";
+  els.progressFill.style.background = "";
   els.progressPct.textContent = "0%";
   els.progressStage.textContent = "Initializing…";
   els.progressMsg.textContent = "";
@@ -2346,6 +2407,9 @@ function listenProgress(jobId) {
       if (p.status === "done") {
         es.close(); currentEventSource = null;
         showResult(p.output_file);
+      } else if (p.status === "cancelled") {
+        es.close(); currentEventSource = null;
+        showRenderCancelled();
       } else if (p.status === "error") {
         es.close(); currentEventSource = null;
         showRenderError(p.error || p.message || "Unknown error");
@@ -2376,10 +2440,28 @@ function showRenderError(msg) {
   els.progressMsg.textContent = msg;
   els.progressFill.style.background = "linear-gradient(90deg, #d83a3a 0%, #ff7a4a 100%)";
   els.renderBtn.disabled = false;
+  els.cancelBtn.disabled = false;
+}
+
+// A clean cancel: hide the progress box and return to a ready state so the user
+// can adjust and re-export (not a failure — no red error left on screen).
+function showRenderCancelled() {
+  els.progressBox.classList.add("hidden");
+  els.progressFill.style.background = "";
+  els.progressFill.style.width = "0%";
+  els.renderBtn.disabled = false;
+  els.cancelBtn.disabled = false;
+  currentJobId = null;
+  flashTopMessage("Export cancelled.");
 }
 
 async function cancelRender() {
   if (!currentJobId) return;
+  // Immediate feedback — the backend kills ffmpeg within a beat, then the SSE
+  // "cancelled" status resets the UI via showRenderCancelled().
+  els.cancelBtn.disabled = true;
+  els.progressStage.textContent = "Cancelling…";
+  els.progressMsg.textContent = "";
   try {
     await fetch(`/api/job/${currentJobId}/cancel`, { method: "POST" });
   } catch (e) { /* ignore */ }
@@ -2426,6 +2508,7 @@ els.previewBar.querySelectorAll("[data-pv-seek]").forEach(b =>
   b.addEventListener("click", () => pvSeekOutput(parseFloat(b.dataset.pvSeek))));
 
 els.saveProjectBtn.addEventListener("click", saveProject);
+els.newProjectBtn.addEventListener("click", newProject);
 els.loadProjectBtn.addEventListener("click", loadProject);
 els.deleteProjectBtn.addEventListener("click", deleteProject);
 els.projectSelect.addEventListener("change", updateProjectButtons);

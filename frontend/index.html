@@ -34,6 +34,7 @@
     <div class="project-bar">
       <input id="projectName" type="text" placeholder="Project name" autocomplete="off" />
       <button id="saveProjectBtn" type="button" class="btn small primary" title="Save (Ctrl+S)">Save</button>
+      <button id="newProjectBtn" type="button" class="btn small" title="Start a fresh project — clears events, text, music & the source video">✦ New</button>
     </div>
     <div class="project-bar">
       <select id="projectSelect" title="Load a saved project">
@@ -186,7 +187,10 @@
     <div class="music-panel hidden" id="musicPanel">
       <div class="text-header">
         <h3>🎵 Background music</h3>
-        <button id="musicAuditionBtn" type="button" class="btn small" title="Listen to the track on its own">▶ Audition</button>
+        <div class="row">
+          <button id="musicClearBtn" type="button" class="btn small ghost hidden" title="Remove the background music">✕ Remove music</button>
+          <button id="musicAuditionBtn" type="button" class="btn small" title="Listen to the track on its own">▶ Audition</button>
+        </div>
       </div>
       <p class="muted text-hint">
         Mixed onto the final video. While previewing, the track plays in sync so you can

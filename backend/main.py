@@ -764,7 +764,7 @@ async def progress_stream(job_id: str, request: Request):
             if payload != last_payload:
                 yield f"data: {json.dumps(payload)}\n\n"
                 last_payload = payload
-            if current.status in ("done", "error"):
+            if current.status in ("done", "error", "cancelled"):
                 return
             await asyncio.sleep(0.4)
 
