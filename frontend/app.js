@@ -14,6 +14,9 @@ const els = {
   slowSlider: $("slowSlider"),
   slowLabel: $("slowLabel"),
   slowHint: $("slowHint"),
+  brightSlider: $("brightSlider"),
+  brightLabel: $("brightLabel"),
+  brightReset: $("brightReset"),
 
   player: $("player"),
   overlay: $("overlayMsg"),
@@ -121,6 +124,10 @@ let clipUndoStack = []; // snapshots of `clips` taken before destructive edits
 let outHeight = 0;        // target output height (px); 0 = native source height
 let lastBrowseDir = "";  // last folder opened in the file browser (persisted)
 const probeCache = {};   // video path -> probe info {width,height,fps,...}
+// Per-source brightness: video path -> percent (-50..+50, 0 = unchanged).
+// Previewed live via a CSS filter on the player; the render maps the same
+// value onto ffmpeg's eq filter, so what you see is what gets burned in.
+let sourceAdjust = {};
 
 // Text overlays burned onto the final video. Each: {id,text,font,sizePct,
 // color,x,y,start,end,shadow}. x/y are the text CENTRE as a fraction of the
@@ -191,6 +198,7 @@ function saveState() {
       clips,
       texts,
       music,
+      sourceAdjust,
     }));
   } catch (e) { /* ignore */ }
 }
@@ -221,6 +229,10 @@ function loadState() {
       nextTextId = Math.max(0, ...texts.map(t => t.id || 0)) + 1;
     }
     if (s.music) music = normalizeMusic(s.music);
+    if (s.sourceAdjust && typeof s.sourceAdjust === "object") {
+      sourceAdjust = {};
+      for (const [path, v] of Object.entries(s.sourceAdjust)) setBrightness(path, v);
+    }
   } catch (e) { /* ignore */ }
 }
 
@@ -290,15 +302,14 @@ function fmtClock(seconds) {
 }
 
 function parseTime(str) {
-  // Accept "12.34" or "1:12.34" or "01:12.34"
+  // Accept "12.34", "1:12.34" (m:s) or "1:02:03.5" (h:m:s)
   if (str === null || str === undefined) return NaN;
   str = String(str).trim();
   if (!str) return NaN;
   if (str.includes(":")) {
-    const parts = str.split(":");
-    const m = parseFloat(parts[0]) || 0;
-    const s = parseFloat(parts[1]) || 0;
-    return m * 60 + s;
+    return str.split(":")
+      .map(p => parseFloat(p) || 0)
+      .reduce((acc, p) => acc * 60 + p, 0);
   }
   return parseFloat(str);
 }
@@ -331,7 +342,59 @@ function updatePickLabel() {
   els.pickVideoBtn.title = currentVideo || "Pick a video from any drive/folder";
 }
 
+// ---- Per-source brightness ------------------------------------------
+function getBrightness(path) {
+  return (path && sourceAdjust[path]) || 0;
+}
+
+function setBrightness(path, v) {
+  if (!path) return;
+  v = Math.max(-50, Math.min(50, Math.round(Number(v) || 0)));
+  if (v) sourceAdjust[path] = v; else delete sourceAdjust[path];
+}
+
+// Live preview of the adjustment on whatever source the player is showing —
+// selectVideo routes every source switch (capture, event preview, preview
+// output segments) through here, so the filter always tracks the source.
+function applyPlayerBrightness() {
+  const v = getBrightness(currentVideo);
+  els.player.style.filter = v ? `brightness(${(1 + v / 100).toFixed(3)})` : "";
+}
+
+function updateBrightnessControl() {
+  const v = getBrightness(currentVideo);
+  els.brightSlider.disabled = !currentVideo;
+  els.brightSlider.value = v;
+  els.brightLabel.textContent = v > 0 ? `+${v}%` : `${v}%`;
+  els.brightReset.classList.toggle("hidden", !v);
+}
+
+// One pending "source finished loading" callback. Every source switch
+// invalidates it, so a rapid series of switches (preview segment skips,
+// event previews) can never leave stale loadeddata handlers behind that
+// would later double-play or re-seek the wrong range.
+let sourceReadyHandler = null;
+function cancelSourceReady() {
+  if (sourceReadyHandler) {
+    els.player.removeEventListener("loadeddata", sourceReadyHandler);
+    sourceReadyHandler = null;
+  }
+}
+function onSourceReady(fn) {
+  cancelSourceReady();
+  const h = () => { cancelSourceReady(); fn(); };
+  sourceReadyHandler = h;
+  els.player.addEventListener("loadeddata", h);
+}
+
 async function selectVideo(path) {
+  cancelSourceReady();
+  // An I-mark taken on one source must not pair with an O-mark on another —
+  // switching videos mid-capture cancels the capture.
+  if (captureStart !== null && path !== currentVideo) {
+    setCaptureState(false);
+    flashTopMessage("Capture cancelled — the source video changed");
+  }
   if (!path) {
     currentVideo = null;
     els.player.removeAttribute("src");
@@ -339,6 +402,8 @@ async function selectVideo(path) {
     els.overlay.classList.remove("hidden");
     els.playerInfo.textContent = "No video selected";
     updatePickLabel();
+    applyPlayerBrightness();
+    updateBrightnessControl();
     refreshResolutionOptions();
     renderTextOverlays();
     return;
@@ -349,6 +414,8 @@ async function selectVideo(path) {
   els.player.load();
   els.overlay.classList.add("hidden");
   updatePickLabel();
+  applyPlayerBrightness();
+  updateBrightnessControl();
   renderTextOverlays();
   // Probe for fps / resolution
   const info = await probeVideo(path);
@@ -675,6 +742,9 @@ window.addEventListener("mousemove", (e) => {
 
 // ---- Slow slider ----------------------------------------------------
 function updateSlowLabel() {
+  // The preview plan bakes in the slow-mo rate — changing it invalidates the
+  // plan (segment rates/durations), so leave preview like structural edits do.
+  if (pvMode) pvExit();
   const v = parseInt(els.slowSlider.value, 10);
   els.slowLabel.textContent = `${v}%`;
   const factor = 100 / v;
@@ -875,6 +945,9 @@ els.clipsBody.addEventListener("change", (e) => {
     const id = parseInt(cb.dataset.id, 10);
     const clip = clips.find(c => c.id === id);
     if (clip) {
+      // Adding/removing a slow-mo replay changes the segment plan — leave
+      // preview (same policy as structural edits) instead of playing stale.
+      if (pvMode) pvExit();
       clip.slowmo = cb.checked;
       saveState();
       refreshRenderSummary();
@@ -976,6 +1049,7 @@ els.clipsBody.addEventListener("dragend", () => {
 let previewWatchdog = null;
 let _singleClipWatcher = null;
 function clearSingleClipPreview() {
+  cancelSourceReady();
   if (previewWatchdog) { clearTimeout(previewWatchdog); previewWatchdog = null; }
   if (_singleClipWatcher) {
     els.player.removeEventListener("timeupdate", _singleClipWatcher);
@@ -988,12 +1062,8 @@ function previewClip(clip) {
   // If this clip belongs to a different source than the one loaded, switch the
   // player to that source first, then seek once the new media is ready.
   if (clip.video && clip.video !== currentVideo) {
-    const onReady = () => {
-      els.player.removeEventListener("loadeddata", onReady);
-      _playClipRange(clip);
-    };
-    els.player.addEventListener("loadeddata", onReady);
-    selectVideo(clip.video);
+    selectVideo(clip.video);                       // invalidates older callbacks
+    onSourceReady(() => _playClipRange(clip));
     return;
   }
   _playClipRange(clip);
@@ -1010,10 +1080,13 @@ function _playClipRange(clip) {
   };
   _singleClipWatcher = watcher;
   els.player.addEventListener("timeupdate", watcher);
+  // Wall-clock fallback: scale by the playback rate, otherwise previewing at
+  // 0.25-0.5× would be cut off partway through.
+  const rate = els.player.playbackRate || 1;
   previewWatchdog = setTimeout(() => {
     els.player.pause();
     clearSingleClipPreview();
-  }, (clip.end - clip.start) * 1000 + 1500);
+  }, ((clip.end - clip.start) / rate) * 1000 + 1500);
 }
 
 // ---- Preview output (play the assembled highlight in render order) --
@@ -1059,6 +1132,7 @@ function buildPvPlan() {
 }
 
 function pvClearWatch() {
+  cancelSourceReady();   // drop a pending cross-source segment start, if any
   if (pvWatcher) { els.player.removeEventListener("timeupdate", pvWatcher); pvWatcher = null; }
   if (pvWatchdog) { clearTimeout(pvWatchdog); pvWatchdog = null; }
 }
@@ -1120,12 +1194,8 @@ function pvStartSegment(i, autoplay, startAt) {
   };
   if (seg.video && seg.video !== currentVideo) {
     pvSwitching = true;
-    const onReady = () => {
-      els.player.removeEventListener("loadeddata", onReady);
-      if (pvMode) begin();
-    };
-    els.player.addEventListener("loadeddata", onReady);
-    selectVideo(seg.video);
+    selectVideo(seg.video);                        // invalidates older callbacks
+    onSourceReady(() => { if (pvMode) begin(); });
   } else {
     begin();
   }
@@ -1249,13 +1319,17 @@ function pvSyncPlayBtn() {
 // slaved to the assembled output so the mix can be auditioned live.
 
 async function loadMusicLibrary() {
+  let loaded = false;
   try {
     const res = await fetch("/api/music");
     const data = await res.json();
     musicTracks = Array.isArray(data.tracks) ? data.tracks : [];
+    loaded = true;
   } catch (e) { musicTracks = []; }
-  // Drop a stored selection whose file was removed from the library.
-  if (music.track && !musicTracks.some(t => t.file === music.track)) music.track = "";
+  // Drop a stored selection whose file was removed from the library — but only
+  // when the library actually loaded; a transient fetch failure (server still
+  // starting up) must not wipe the user's saved choice.
+  if (loaded && music.track && !musicTracks.some(t => t.file === music.track)) music.track = "";
   renderMusicPanel();
   refreshRenderSummary();
 }
@@ -2028,6 +2102,9 @@ els.textOverlayLayer.addEventListener("keydown", (e) => {
   if (txEditId == null) return;
   if (e.key === "Escape" || (e.key === "Enter" && !e.shiftKey)) {
     e.preventDefault();
+    // Don't let the Escape bubble to the document handler — it would also
+    // exit the whole preview instead of just committing this inline edit.
+    e.stopPropagation();
     commitInlineEdit();
   }
 });
@@ -2097,7 +2174,7 @@ function currentProjectPayload(name) {
     intro_seconds: parseFloat(els.introSeconds.value || "4"),
     slow_percent: parseInt(els.slowSlider.value, 10),
     video: currentVideo || (clips[0] && clips[0].video) || "",
-    clips: clips.map(c => ({ start: c.start, end: c.end, slowmo: c.slowmo !== false, video: c.video || "" })),
+    clips: clips.map(c => ({ start: c.start, end: c.end, slowmo: c.slowmo !== false, video: c.video || "", brightness: getBrightness(c.video) })),
     texts: texts.map(t => ({
       text: t.text, font: t.font, bold: !!t.bold, italic: !!t.italic,
       sizePct: t.sizePct, color: t.color,
@@ -2125,6 +2202,10 @@ function applyProjectPayload(p) {
     // Migration: old projects stored clips without `video` (single-source) -> backfill.
     video: c.video || p.video || "",
   }));
+  // Rebuild the per-source brightness map from the clips' stored values
+  // (old projects without `brightness` -> no adjustment).
+  sourceAdjust = {};
+  (p.clips || []).forEach(c => setBrightness(c.video || p.video || "", c.brightness));
   // Text overlays (old projects without `texts` -> none).
   texts = (p.texts || []).map(normalizeText);
   selectedTextId = null;
@@ -2228,6 +2309,7 @@ function newProject() {
   music = normalizeMusic({});
   musicAuditioning = false;
   clipUndoStack = [];
+  sourceAdjust = {};
 
   // Project name + selection.
   els.projectName.value = "";
@@ -2290,6 +2372,19 @@ function flashTopMessage(msg) {
 }
 
 // ---- Render ---------------------------------------------------------
+// One export at a time: a second concurrent job would hijack the progress UI
+// (Cancel then only reaches the newest job) and two same-second exports could
+// even write the same output filename.
+let renderBusy = false;
+function guardRenderBusy() {
+  if (renderBusy) {
+    flashTopMessage("An export is already running — wait or cancel it first");
+    return true;
+  }
+  renderBusy = true;
+  return false;
+}
+
 async function exportSingleClip(clip, includeSlowmo) {
   const clipVideo = clip.video || currentVideo;
   if (!clipVideo) {
@@ -2300,6 +2395,7 @@ async function exportSingleClip(clip, includeSlowmo) {
     alert("Invalid clip");
     return;
   }
+  if (guardRenderBusy()) return;
   els.renderBtn.disabled = true;
   els.cancelBtn.disabled = false;
   els.progressBox.classList.remove("hidden");
@@ -2322,6 +2418,7 @@ async function exportSingleClip(clip, includeSlowmo) {
       slow_percent: parseInt(els.slowSlider.value, 10),
       label: `clip${idx}`,
       out_height: outHeight || 0,
+      brightness: getBrightness(clipVideo),
     };
     const res = await fetch("/api/export-clip", {
       method: "POST",
@@ -2353,6 +2450,7 @@ async function startRender() {
       return;
     }
   }
+  if (guardRenderBusy()) return;
   els.renderBtn.disabled = true;
   els.cancelBtn.disabled = false;
   els.progressBox.classList.remove("hidden");
@@ -2366,7 +2464,7 @@ async function startRender() {
   try {
     const body = {
       video: currentVideo || (clips[0] && clips[0].video) || "",
-      clips: clips.map(c => ({ start: c.start, end: c.end, slowmo: c.slowmo !== false, video: c.video })),
+      clips: clips.map(c => ({ start: c.start, end: c.end, slowmo: c.slowmo !== false, video: c.video, brightness: getBrightness(c.video) })),
       slow_percent: parseInt(els.slowSlider.value, 10),
       intro_seconds: parseFloat(els.introSeconds.value || "0"),
       tournament: els.tournament.value,
@@ -2416,10 +2514,37 @@ function listenProgress(jobId) {
       }
     } catch (e) { /* ignore */ }
   };
-  es.onerror = () => { /* SSE will auto-retry; handled by status events */ };
+  es.onerror = () => {
+    // Transient drops auto-retry (readyState CONNECTING). A CLOSED stream
+    // never retries — e.g. the dev server restarted mid-render and the job
+    // registry is gone (404) — so resolve the UI instead of hanging forever.
+    if (es.readyState !== EventSource.CLOSED) return;
+    if (currentEventSource === es) currentEventSource = null;
+    resolveJobAfterStreamLoss(jobId);
+  };
+}
+
+// The progress stream died for good: poll the job once and settle the UI —
+// show the final state if the job finished, re-attach if it's still running,
+// or surface an error if the job is gone (server restart kills the render).
+async function resolveJobAfterStreamLoss(jobId) {
+  if (currentJobId !== jobId) return;   // a newer job took over the UI
+  try {
+    const res = await fetch(`/api/job/${jobId}`);
+    if (res.ok) {
+      const p = await res.json();
+      if (p.status === "done") return showResult(p.output_file);
+      if (p.status === "cancelled") return showRenderCancelled();
+      if (p.status === "error") return showRenderError(p.error || p.message || "Render failed");
+      setTimeout(() => { if (currentJobId === jobId) listenProgress(jobId); }, 1000);
+      return;
+    }
+  } catch (e) { /* server unreachable — fall through */ }
+  showRenderError("Render job lost (server restarted?) — check the output folder, then export again.");
 }
 
 function showResult(filename) {
+  renderBusy = false;
   els.progressBox.classList.add("hidden");
   els.resultBox.classList.remove("hidden");
   els.resultFilename.textContent = filename;
@@ -2436,6 +2561,7 @@ async function openOutputFolder() {
 }
 
 function showRenderError(msg) {
+  renderBusy = false;
   els.progressStage.textContent = "❌ Error";
   els.progressMsg.textContent = msg;
   els.progressFill.style.background = "linear-gradient(90deg, #d83a3a 0%, #ff7a4a 100%)";
@@ -2446,6 +2572,7 @@ function showRenderError(msg) {
 // A clean cancel: hide the progress box and return to a ready state so the user
 // can adjust and re-export (not a failure — no red error left on screen).
 function showRenderCancelled() {
+  renderBusy = false;
   els.progressBox.classList.add("hidden");
   els.progressFill.style.background = "";
   els.progressFill.style.width = "0%";
@@ -2483,6 +2610,20 @@ document.addEventListener("keydown", (e) => {
 });
 
 els.slowSlider.addEventListener("input", updateSlowLabel);
+els.brightSlider.addEventListener("input", (e) => {
+  if (!currentVideo) return;
+  setBrightness(currentVideo, e.target.value);
+  applyPlayerBrightness();
+  updateBrightnessControl();
+  saveState();
+});
+els.brightReset.addEventListener("click", () => {
+  if (!currentVideo) return;
+  setBrightness(currentVideo, 0);
+  applyPlayerBrightness();
+  updateBrightnessControl();
+  saveState();
+});
 els.resolutionSelect.addEventListener("change", (e) => {
   outHeight = parseInt(e.target.value, 10) || 0;
   saveState();
@@ -2536,9 +2677,10 @@ els.newRenderBtn.addEventListener("click", () => {
 
 // ---- Keyboard shortcuts --------------------------------------------
 document.addEventListener("keydown", (e) => {
-  // Don't hijack while typing in inputs
+  // Don't hijack while typing in inputs (incl. an inline-edited overlay label)
   const tag = (e.target.tagName || "").toLowerCase();
   if (tag === "input" || tag === "textarea" || tag === "select") return;
+  if (e.target.isContentEditable) return;
 
   if (!els.player.src) return;
 

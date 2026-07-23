@@ -93,6 +93,7 @@ class Clip:
     end: float
     slowmo: bool = True  # if False: only real-speed segment, no slow-mo
     video_path: Optional[Path] = None  # source video for this clip (multi-source)
+    brightness: float = 0.0  # percent -50..+50; 0 = unchanged (set per source)
 
     @property
     def duration(self) -> float:
@@ -194,6 +195,12 @@ def get_job(job_id: str) -> Optional[RenderJob]:
 
 def register_job(job: RenderJob) -> None:
     with _JOBS_LOCK:
+        # Prune old finished jobs (dict insertion order = chronological) so the
+        # registry doesn't grow all session; keep the last 20 for late polls.
+        terminal = [jid for jid, j in _JOBS.items()
+                    if j.status in ("done", "error", "cancelled")]
+        for jid in terminal[:-20]:
+            _JOBS.pop(jid, None)
         _JOBS[job.job_id] = job
 
 
@@ -204,7 +211,7 @@ def probe_video(path: Path) -> dict:
     """Return width, height, fps, duration, has_audio. Falls back to safe defaults."""
     cmd = [
         "ffprobe", "-v", "error",
-        "-show_entries", "stream=index,codec_type,width,height,r_frame_rate,duration",
+        "-show_entries", "stream=index,codec_type,width,height,r_frame_rate,avg_frame_rate,duration",
         "-show_entries", "format=duration",
         "-of", "json", str(path),
     ]
@@ -217,9 +224,17 @@ def probe_video(path: Path) -> dict:
 
         w = int(v.get("width", 1920))
         h = int(v.get("height", 1080))
-        rfr = v.get("r_frame_rate", f"{DEFAULT_FPS}/1")
-        num, den = rfr.split("/")
-        fps = float(num) / float(den) if float(den) else DEFAULT_FPS
+
+        def frac(expr) -> float:
+            try:
+                num, den = str(expr).split("/")
+                return float(num) / float(den) if float(den) else 0.0
+            except Exception:
+                return 0.0
+
+        # Prefer avg_frame_rate (the true average) — r_frame_rate can be a
+        # wildly high guess on VFR sources (e.g. phone footage).
+        fps = frac(v.get("avg_frame_rate", "")) or frac(v.get("r_frame_rate", "")) or DEFAULT_FPS
         duration = float(v.get("duration") or data.get("format", {}).get("duration") or 0.0)
         fps = round(fps, 3)
         return {
@@ -492,7 +507,24 @@ def _run_ffmpeg(
         raise RuntimeError(f"ffmpeg exited {proc.returncode}\n{tail}")
 
 
-def _video_filter(width: int, height: int, fps: float, setpts: Optional[float] = None) -> str:
+def _brightness_filter(brightness: float) -> str:
+    """Map a UI brightness percent (-50..+50) onto ffmpeg's eq filter as a
+    MULTIPLICATIVE luma gain (out = in * k), matching the CSS
+    `filter: brightness(k)` the frontend previews with. eq pivots its contrast
+    at mid-grey, so adding brightness=(k-1)/2 restores the multiplicative form
+    — black (and the letterbox pad) stays exactly black. '' when ~0."""
+    try:
+        v = max(-50.0, min(50.0, float(brightness)))
+    except (TypeError, ValueError):
+        return ""
+    if abs(v) < 0.5:
+        return ""
+    k = 1.0 + v / 100.0
+    return f"eq=contrast={k:.4f}:brightness={(k - 1.0) / 2.0:.4f}"
+
+
+def _video_filter(width: int, height: int, fps: float, setpts: Optional[float] = None,
+                  brightness: float = 0.0) -> str:
     parts = []
     if setpts is not None:
         parts.append(f"setpts={setpts:.5f}*PTS")
@@ -503,6 +535,9 @@ def _video_filter(width: int, height: int, fps: float, setpts: Optional[float] =
     parts.append(f"scale={width}:{height}:force_original_aspect_ratio=decrease:flags=lanczos")
     parts.append(f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black")
     parts.append("setsar=1")
+    eq = _brightness_filter(brightness)
+    if eq:
+        parts.append(eq)
     parts.append(f"fps={fps}")
     parts.append("format=yuv420p")
     return ",".join(parts)
@@ -598,10 +633,11 @@ def render_real(
         "-to", f"{clip.end:.3f}",
         "-i", str(src),
     ]
+    vf = _video_filter(width, height, fps, brightness=clip.brightness)
     if source_has_audio:
         # Map the source's own audio.
         args += [
-            "-vf", _video_filter(width, height, fps),
+            "-vf", vf,
             *NVENC_ARGS,
             *AAC_ARGS,
         ]
@@ -611,7 +647,7 @@ def render_real(
         args += [
             "-f", "lavfi", "-t", f"{clip.duration:.3f}",
             "-i", "anullsrc=r=48000:cl=stereo",
-            "-vf", _video_filter(width, height, fps),
+            "-vf", vf,
             "-map", "0:v:0", "-map", "1:a", "-shortest",
             *NVENC_ARGS,
             *AAC_ARGS,
@@ -619,7 +655,7 @@ def render_real(
     else:
         args += [
             "-map", "0:v:0",
-            "-vf", _video_filter(width, height, fps),
+            "-vf", vf,
             *NVENC_ARGS,
             "-an",
         ]
@@ -643,7 +679,7 @@ def render_slowmo(
     out_duration = clip.duration * factor
 
     badge = _slowmo_badge_filter(height)
-    vf = _video_filter(width, height, fps, setpts=factor)
+    vf = _video_filter(width, height, fps, setpts=factor, brightness=clip.brightness)
     if badge:
         vf = f"{vf},{badge}"
 
@@ -734,8 +770,11 @@ def render_slowmo(
 def concat_segments(segments: List[Path], out_path: Path,
                     expected_duration: float,
                     on_progress: Callable[[float], None],
-                    cancel: threading.Event) -> None:
-    list_file = TEMP_DIR / f"concat_{uuid.uuid4().hex}.txt"
+                    cancel: threading.Event,
+                    list_prefix: str = "concat") -> None:
+    # The list file carries the job prefix so per-job cleanup covers it and a
+    # concurrent job's cleanup can never touch another job's list.
+    list_file = TEMP_DIR / f"{list_prefix}_{uuid.uuid4().hex}.txt"
     with list_file.open("w", encoding="utf-8") as f:
         for seg in segments:
             # ffmpeg concat list: forward slashes work on Windows; quote with single
@@ -757,12 +796,13 @@ def concat_segments(segments: List[Path], out_path: Path,
 def concat_with_text(segments: List[Path], out_path: Path, text_vf: str,
                      need_audio: bool, expected_duration: float,
                      on_progress: Callable[[float], None],
-                     cancel: threading.Event) -> None:
+                     cancel: threading.Event,
+                     list_prefix: str = "concat") -> None:
     """Concat the segments AND burn text overlays in a single re-encode pass.
     Used instead of concat_segments when the job has text overlays — the
     drawtext `t` is then the final-timeline timestamp (starting at the intro).
     Video is re-encoded (NVENC); audio is copied (segments share AAC params)."""
-    list_file = TEMP_DIR / f"concat_{uuid.uuid4().hex}.txt"
+    list_file = TEMP_DIR / f"{list_prefix}_{uuid.uuid4().hex}.txt"
     with list_file.open("w", encoding="utf-8") as f:
         for seg in segments:
             posix = str(seg).replace("\\", "/")
@@ -822,7 +862,9 @@ def mix_background_music(video_in: Path, out_path: Path, music: "MusicTrack",
             )
     else:
         # No original audio: the music IS the soundtrack (cut to video length).
-        fc = music_chain.replace("[m]", "[a]")
+        # A non-looping track shorter than the video must be padded with
+        # silence, otherwise -shortest would truncate the video to the track.
+        fc = music_chain.replace("[m]", "[a]" if music.loop else ",apad[a]")
 
     args = [
         "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
@@ -989,7 +1031,8 @@ def run_job(job: RenderJob) -> None:
             concat_with_text(segments, video_target, text_vf, need_audio,
                              _expected_total_duration(job),
                              stage_progress(concat_weight),
-                             job.cancel)
+                             job.cancel,
+                             list_prefix=f"{job.job_id}_concat")
         elif len(segments) == 1:
             # Single-segment export (e.g. real-only single clip with no intro):
             # rename instead of running concat.
@@ -1002,7 +1045,8 @@ def run_job(job: RenderJob) -> None:
             concat_segments(segments, video_target,
                             _expected_total_duration(job),
                             stage_progress(concat_weight),
-                            job.cancel)
+                            job.cancel,
+                            list_prefix=f"{job.job_id}_concat")
         completed += concat_weight
 
         # 4. Background music (final audio pass over the assembled video).
@@ -1035,12 +1079,10 @@ def run_job(job: RenderJob) -> None:
             job.error = str(e)
             job.message = f"Error: {e}"
     finally:
-        # Always clean temp files belonging to this job
+        # Always clean temp files belonging to this job (concat lists carry the
+        # job prefix too, so this can never touch a concurrent job's files).
         try:
             for p in TEMP_DIR.glob(f"{job.job_id}_*"):
-                p.unlink(missing_ok=True)
-            for p in TEMP_DIR.glob("concat_*.txt"):
-                # leave concat lists older than 1h alone; otherwise fine to drop
                 p.unlink(missing_ok=True)
         except Exception:
             pass

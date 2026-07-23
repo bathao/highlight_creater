@@ -44,6 +44,37 @@ PROJECT_NAME_RE = re.compile(r"^[A-Za-z0-9 _\-\.]{1,80}$")
 
 app = FastAPI(title="Highlight Creator")
 
+# The app serves the local operator only (uvicorn binds 127.0.0.1). Rejecting
+# unknown Host headers additionally blocks DNS-rebinding tricks, where a
+# malicious website resolves its own domain to 127.0.0.1 to read the API
+# cross-origin from the victim's browser. Implemented as pure ASGI middleware
+# (not BaseHTTPMiddleware) so the SSE progress stream is never buffered.
+_ALLOWED_HOSTNAMES = {"127.0.0.1", "localhost", "[::1]", ""}
+
+
+class _LocalHostsOnly:
+    def __init__(self, asgi_app):
+        self.asgi_app = asgi_app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http":
+            host = ""
+            for name, value in scope.get("headers") or []:
+                if name == b"host":
+                    host = value.decode("latin-1").lower()
+                    break
+            hostname = "[::1]" if host.startswith("[::1]") else host.split(":")[0]
+            if hostname not in _ALLOWED_HOSTNAMES:
+                await send({"type": "http.response.start", "status": 403,
+                            "headers": [(b"content-type", b"text/plain")]})
+                await send({"type": "http.response.body",
+                            "body": b"Forbidden: unexpected Host header"})
+                return
+        await self.asgi_app(scope, receive, send)
+
+
+app.add_middleware(_LocalHostsOnly)
+
 
 # --------------------------------------------------------------------------
 # Static frontend
@@ -61,7 +92,7 @@ async def index() -> HTMLResponse:
     for asset in ("app.js", "style.css"):
         path = FRONTEND_DIR / asset
         if path.is_file():
-            v = int(path.stat().st_mtime)
+            v = path.stat().st_mtime_ns  # ns: two edits within 1s still bust
             html = html.replace(f"/static/{asset}", f"/static/{asset}?v={v}")
     return HTMLResponse(
         html,
@@ -471,6 +502,7 @@ class ProjectClip(BaseModel):
     end: float
     slowmo: bool = True
     video: str = ""  # source video for this clip (multi-source projects)
+    brightness: float = 0.0  # per-source brightness percent (-50..+50)
 
 
 class ProjectPayload(BaseModel):
@@ -482,6 +514,10 @@ class ProjectPayload(BaseModel):
     slow_percent: int = 50
     video: str = ""
     clips: List[ProjectClip] = []
+    # Stored as-is in the frontend's own shape (camelCase keys) — the project
+    # file is a round-trip container, not a render request, so no validation.
+    texts: List[dict] = []
+    music: Optional[dict] = None
 
 
 def _safe_project_path(name: str) -> Path:
@@ -549,6 +585,7 @@ class ClipModel(BaseModel):
     end: float = Field(gt=0)
     slowmo: bool = True
     video: str = ""  # source video for this clip; falls back to RenderRequest.video
+    brightness: float = Field(ge=-50, le=50, default=0)  # per-source brightness (%)
 
 
 class TextOverlayModel(BaseModel):
@@ -600,6 +637,7 @@ class ExportClipRequest(BaseModel):
     slow_percent: int = Field(ge=10, le=100, default=50)
     label: str = ""
     out_height: int = Field(ge=0, le=2160, default=0)  # 0 = native source height
+    brightness: float = Field(ge=-50, le=50, default=0)  # per-source brightness (%)
 
 
 @app.post("/api/export-clip")
@@ -613,7 +651,7 @@ async def export_clip(req: ExportClipRequest) -> JSONResponse:
     video_path = _safe_source_path(req.video)
 
     clip = render.Clip(start=req.start, end=req.end, slowmo=req.include_slowmo,
-                       video_path=video_path)
+                       video_path=video_path, brightness=req.brightness)
 
     stem = Path(req.video).stem
     raw_label = req.label.strip() or f"t{req.start:.1f}-t{req.end:.1f}"
@@ -665,7 +703,7 @@ async def start_render(req: RenderRequest) -> JSONResponse:
             raise HTTPException(400, f"Invalid clip {c.start}-{c.end}")
         src = resolve(c.video or req.video)
         clips.append(render.Clip(start=c.start, end=c.end, slowmo=c.slowmo,
-                                 video_path=src))
+                                 video_path=src, brightness=c.brightness))
 
     # Text overlays: keep only those with actual content (cap defensively).
     texts = [

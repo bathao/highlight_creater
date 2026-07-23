@@ -66,6 +66,14 @@
         </button>
         <small class="hint">Pick from any drive/folder — processed in place, no copy into workspace. Switch videos to add events from multiple sources.</small>
       </label>
+      <label>☀ Brightness: <span id="brightLabel">0%</span>
+        <div class="bright-row">
+          <input id="brightSlider" type="range" min="-50" max="50" step="5" value="0" disabled
+                 title="Brighten or darken the current source video" />
+          <button id="brightReset" type="button" class="btn small ghost hidden" title="Reset brightness">↺</button>
+        </div>
+        <small class="hint">Per source video — applies to every event from the video above, live in the player and burned into the export.</small>
+      </label>
       <label>Slow-motion: <span id="slowLabel">50%</span>
         <input id="slowSlider" type="range" min="10" max="100" step="5" value="50" />
         <small class="hint" id="slowHint">Plays at 50% of real speed (2× slower)</small>

@@ -878,6 +878,12 @@ input[type="range"] {
 /* Output resolution picker (lives in the Setup grid, under Slow-motion) */
 .res-row select:disabled { opacity: 0.6; cursor: not-allowed; }
 
+/* Per-source brightness (lives in the Setup grid, under Source video) */
+.bright-row { display: flex; align-items: center; gap: 8px; }
+.bright-row input[type="range"] { flex: 1; min-width: 0; }
+.bright-row input[type="range"]:disabled { opacity: 0.5; cursor: not-allowed; }
+.bright-row .btn { flex-shrink: 0; padding: 4px 9px; }
+
 .progress {
   margin-top: 16px;
   padding: 14px 16px;
