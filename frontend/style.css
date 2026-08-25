@@ -884,6 +884,53 @@ input[type="range"] {
 .bright-row input[type="range"]:disabled { opacity: 0.5; cursor: not-allowed; }
 .bright-row .btn { flex-shrink: 0; padding: 4px 9px; }
 
+/* Per-source crop (lives in the Setup grid, under Brightness) */
+.crop-row { display: flex; align-items: center; gap: 8px; }
+.crop-row .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* ----- Crop editor (over the player) ----- */
+.crop-editor {
+  position: absolute; inset: 0;
+  z-index: 6; /* above the text-overlay layer (4) */
+  overflow: hidden; /* keep the dim mask inside the wrapper */
+}
+.crop-editor.hidden { display: none; }
+.crop-region {
+  position: absolute;
+  /* One element dims everything outside itself. */
+  box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.55);
+  border: 1px dashed #4a7dff;
+  cursor: move;
+}
+.crop-handle {
+  position: absolute;
+  width: 12px; height: 12px;
+  background: #4a7dff;
+  border: 1px solid #dfe6ff;
+  border-radius: 2px;
+}
+.crop-handle.nw { left: -6px;  top: -6px;    cursor: nwse-resize; }
+.crop-handle.n  { left: calc(50% - 6px); top: -6px;    cursor: ns-resize; }
+.crop-handle.ne { right: -6px; top: -6px;    cursor: nesw-resize; }
+.crop-handle.e  { right: -6px; top: calc(50% - 6px);   cursor: ew-resize; }
+.crop-handle.se { right: -6px; bottom: -6px; cursor: nwse-resize; }
+.crop-handle.s  { left: calc(50% - 6px); bottom: -6px; cursor: ns-resize; }
+.crop-handle.sw { left: -6px;  bottom: -6px; cursor: nesw-resize; }
+.crop-handle.w  { left: -6px;  top: calc(50% - 6px);   cursor: ew-resize; }
+.crop-toolbar {
+  position: absolute;
+  left: 50%; bottom: 10px;
+  transform: translateX(-50%);
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 10px;
+  background: rgba(13, 19, 34, 0.9);
+  border: 1px solid #1f2841;
+  border-radius: 8px;
+  white-space: nowrap;
+}
+.crop-free { display: flex; align-items: center; gap: 5px; font-size: 12px; color: #aab3cc; }
+.crop-free input { accent-color: #4a7dff; }
+
 .progress {
   margin-top: 16px;
   padding: 14px 16px;

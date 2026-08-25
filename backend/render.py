@@ -31,7 +31,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Tuple
 
 from PIL import Image, ImageDraw, ImageFont
 
@@ -94,6 +94,7 @@ class Clip:
     slowmo: bool = True  # if False: only real-speed segment, no slow-mo
     video_path: Optional[Path] = None  # source video for this clip (multi-source)
     brightness: float = 0.0  # percent -50..+50; 0 = unchanged (set per source)
+    crop: Optional[dict] = None  # {"x","y","w","h"} fractions of the source frame; None = full frame (set per source)
 
     @property
     def duration(self) -> float:
@@ -362,6 +363,11 @@ def _fade_alpha_expr(start: Optional[float], end: Optional[float],
     return f"max(0,min(1,{ramp}))"
 
 
+# Line height (x fontsize) for multi-line overlays — must match the frontend's
+# .tx-overlay `line-height: 1.15` so the export stacks lines like the preview.
+TEXT_LINE_HEIGHT = 1.15
+
+
 def _build_text_filters(
     texts: List[TextOverlay], width: int, height: int, job_id: str,
     intro_offset: float = 0.0,
@@ -374,41 +380,64 @@ def _build_text_filters(
     parts: List[str] = []
     files: List[Path] = []
     for i, t in enumerate(texts or []):
-        content = (t.text or "").strip()
+        # Normalise line endings: a browser textarea can send "\r\n", and
+        # drawtext renders a stray "\r" as a missing-glyph box on its own line.
+        content = (t.text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
         if not content:
             continue
         font_file = _resolve_font_file(t.font, bool(t.bold), bool(t.italic))
         if not font_file:
             continue
-        txt_path = TEMP_DIR / f"{job_id}_text_{i}.txt"
-        txt_path.write_text(content, encoding="utf-8")
-        files.append(txt_path)
-
         fontsize = max(8, round((float(t.size_pct) / 100.0) * height))
-        dt = (
-            f"drawtext=fontfile='{_esc_ff_path(font_file)}'"
-            f":textfile='{_esc_ff_path(str(txt_path))}'"
-            f":fontsize={fontsize}"
-            f":fontcolor={_ff_color(t.color)}"
-            f":x=w*{_clip01(t.x):.5f}-text_w/2"
-            f":y=h*{_clip01(t.y):.5f}-text_h/2"
-        )
+        # Shared per-overlay options (style + timing) — identical for every line.
+        style = ""
         if getattr(t, "box", False):
             pad = max(4, round(fontsize * 0.3))
             op = max(0.0, min(1.0, float(getattr(t, "box_opacity", 0.45) or 0.0)))
-            dt += f":box=1:boxcolor={_ff_color(t.box_color)}@{op:.3f}:boxborderw={pad}"
+            style += f":box=1:boxcolor={_ff_color(t.box_color)}@{op:.3f}:boxborderw={pad}"
         if t.shadow:
             # Scale the outline with the font so it stays visible at 1080p/1440p.
             bw = max(2, round(fontsize * 0.06))
-            dt += f":borderw={bw}:bordercolor=black@0.6"
+            style += f":borderw={bw}:bordercolor=black@0.6"
         en = _enable_expr(t.start, t.end, intro_offset)
         if en:
-            dt += f":enable='{en}'"
+            style += f":enable='{en}'"
         al = _fade_alpha_expr(t.start, t.end, intro_offset,
                               float(getattr(t, "fade", 0.0) or 0.0))
         if al:
-            dt += f":alpha='{al}'"
-        parts.append(dt)
+            style += f":alpha='{al}'"
+
+        # One drawtext PER LINE. drawtext never wraps, and ffmpeg 8's rewritten
+        # drawtext paints the newline itself as a missing-glyph box (with or
+        # without text_align / text_shaping), so a multi-line label is laid out
+        # here instead: each line is centred on x (like the preview's
+        # text-align:center) and stacked at TEXT_LINE_HEIGHT x fontsize —
+        # the same line-height the frontend's .tx-overlay uses, so the block
+        # matches what was positioned in the player. A single line reduces to
+        # the original x/y expression exactly.
+        lines = content.split("\n")
+        n = len(lines)
+        line_h = fontsize * TEXT_LINE_HEIGHT
+        for k, line in enumerate(lines):
+            if not line.strip():
+                continue  # blank line keeps its slot, draws nothing
+            txt_path = TEMP_DIR / f"{job_id}_text_{i}_{k}.txt"
+            # newline="\n": on Windows the default text mode would rewrite "\n"
+            # as "\r\n" and reintroduce the "\r" glyph issue above.
+            txt_path.write_text(line, encoding="utf-8", newline="\n")
+            files.append(txt_path)
+            off = (k - (n - 1) / 2.0) * line_h  # slot centre relative to block centre
+            y_expr = f"h*{_clip01(t.y):.5f}{off:+.2f}-text_h/2" if n > 1 \
+                else f"h*{_clip01(t.y):.5f}-text_h/2"
+            parts.append(
+                f"drawtext=fontfile='{_esc_ff_path(font_file)}'"
+                f":textfile='{_esc_ff_path(str(txt_path))}'"
+                f":fontsize={fontsize}"
+                f":fontcolor={_ff_color(t.color)}"
+                f":x=w*{_clip01(t.x):.5f}-text_w/2"
+                f":y={y_expr}"
+                + style
+            )
     return ",".join(parts), files
 
 
@@ -523,11 +552,55 @@ def _brightness_filter(brightness: float) -> str:
     return f"eq=contrast={k:.4f}:brightness={(k - 1.0) / 2.0:.4f}"
 
 
+MIN_CROP_FRAC = 0.15  # smallest crop side, as a fraction of the source dimension
+
+
+def _crop_pixels(crop: Optional[dict], src_w: int, src_h: int
+                 ) -> Optional[Tuple[int, int, int, int]]:
+    """Fractional crop {x,y,w,h} -> even pixel rect (cw, ch, cx, cy), or None
+    for a no-op. Clamps silently (values round-trip JSON/localStorage as
+    floats — drift must never brick a render). All four values are rounded
+    down to even: yuv420p subsamples chroma 2x2, so an odd offset would shift
+    chroma against luma at the crop edge. A ~full-frame crop returns None so
+    the untouched filter chains stay byte-identical to a no-crop job."""
+    if not crop or not src_w or not src_h:
+        return None
+    try:
+        x = min(max(float(crop.get("x", 0.0)), 0.0), 1.0)
+        y = min(max(float(crop.get("y", 0.0)), 0.0), 1.0)
+        w = min(max(float(crop.get("w", 1.0)), MIN_CROP_FRAC), 1.0)
+        h = min(max(float(crop.get("h", 1.0)), MIN_CROP_FRAC), 1.0)
+    except (TypeError, ValueError):
+        return None
+    x = min(x, 1.0 - w)
+    y = min(y, 1.0 - h)
+    cx = int(round(x * src_w))
+    cy = int(round(y * src_h))
+    cw = int(round(w * src_w))
+    ch = int(round(h * src_h))
+    cx -= cx % 2
+    cy -= cy % 2
+    cw = max(16, min(cw, src_w - cx))
+    ch = max(16, min(ch, src_h - cy))
+    cw -= cw % 2
+    ch -= ch % 2
+    if cw >= src_w - 2 and ch >= src_h - 2:
+        return None
+    return (cw, ch, cx, cy)
+
+
 def _video_filter(width: int, height: int, fps: float, setpts: Optional[float] = None,
-                  brightness: float = 0.0) -> str:
+                  brightness: float = 0.0,
+                  crop_px: Optional[Tuple[int, int, int, int]] = None) -> str:
     parts = []
     if setpts is not None:
         parts.append(f"setpts={setpts:.5f}*PTS")
+    # Crop runs in source pixels, before the scale onto the canvas. Constant
+    # integers only (digits + colons) so the string is safe verbatim in both
+    # -vf and the -filter_complex embedding in render_slowmo.
+    if crop_px:
+        cw, ch, cx, cy = crop_px
+        parts.append(f"crop={cw}:{ch}:{cx}:{cy}")
     # Aspect-preserving scale + letterbox pad so sources of any resolution/aspect
     # land on the same canvas without stretching. For a source already matching
     # the target this is an identity (scale = no-op, pad = 0). setsar=1 forces
@@ -623,6 +696,7 @@ def render_real(
     source_has_audio: bool,
     need_audio: bool,
     on_progress: Callable[[float], None],
+    crop_px: Optional[Tuple[int, int, int, int]] = None,
 ) -> None:
     src = clip.video_path or job.video_path
     args = [
@@ -633,7 +707,7 @@ def render_real(
         "-to", f"{clip.end:.3f}",
         "-i", str(src),
     ]
-    vf = _video_filter(width, height, fps, brightness=clip.brightness)
+    vf = _video_filter(width, height, fps, brightness=clip.brightness, crop_px=crop_px)
     if source_has_audio:
         # Map the source's own audio.
         args += [
@@ -673,13 +747,15 @@ def render_slowmo(
     source_has_audio: bool,
     need_audio: bool,
     on_progress: Callable[[float], None],
+    crop_px: Optional[Tuple[int, int, int, int]] = None,
 ) -> None:
     src = clip.video_path or job.video_path
     factor = 1.0 / max(0.05, job.slow_ratio)  # 0.5 -> 2.0
     out_duration = clip.duration * factor
 
     badge = _slowmo_badge_filter(height)
-    vf = _video_filter(width, height, fps, setpts=factor, brightness=clip.brightness)
+    vf = _video_filter(width, height, fps, setpts=factor, brightness=clip.brightness,
+                       crop_px=crop_px)
     if badge:
         vf = f"{vf},{badge}"
 
@@ -918,10 +994,23 @@ def run_job(job: RenderJob) -> None:
         for sp in source_order:
             source_info[sp] = probe_video(sp)
 
-        # Canvas = resolution of the FIRST source (the first clip's video).
+        # Per-source crop -> pixel rect against that source's probe dims. One
+        # crop per source (like brightness), resolved once so the canvas and
+        # every segment agree on the same rounded rectangle.
+        def clip_crop_px(clip: Clip) -> Optional[Tuple[int, int, int, int]]:
+            sp = clip.video_path or job.video_path
+            info = source_info.get(sp, {})
+            return _crop_pixels(clip.crop, info.get("width", 0), info.get("height", 0))
+
+        # Canvas = resolution of the FIRST source (the first clip's video),
+        # after its crop when one is set — the cropped region becomes the
+        # canvas at native pixel size (no upscale for the canvas source).
         # Every segment is scaled+letterboxed onto this canvas so concat works.
         first = source_info[source_order[0]]
         width, height, fps = first["width"], first["height"], first["fps"]
+        first_crop = clip_crop_px(job.clips[0]) if job.clips else None
+        if first_crop:
+            width, height = first_crop[0], first_crop[1]
         # Cap fps at 60 for slow-mo headroom; concat needs uniform timing.
         if fps > 60:
             fps = 60.0
@@ -996,7 +1085,7 @@ def run_job(job: RenderJob) -> None:
             real_file = TEMP_DIR / f"{job.job_id}_{idx:02d}_real.mp4"
             render_real(job, clip, real_file, width, height, fps,
                         clip_has_audio(clip), need_audio,
-                        stage_progress(clip.duration))
+                        stage_progress(clip.duration), crop_px=clip_crop_px(clip))
             segments.append(real_file)
             completed += clip.duration
 
@@ -1006,7 +1095,8 @@ def run_job(job: RenderJob) -> None:
                 slow_file = TEMP_DIR / f"{job.job_id}_{idx:02d}_slow.mp4"
                 render_slowmo(job, clip, slow_file, width, height, fps,
                               clip_has_audio(clip), need_audio,
-                              stage_progress(clip.duration * factor))
+                              stage_progress(clip.duration * factor),
+                              crop_px=clip_crop_px(clip))
                 segments.append(slow_file)
                 completed += clip.duration * factor
 

@@ -74,6 +74,13 @@
         </div>
         <small class="hint">Per source video — applies to every event from the video above, live in the player and burned into the export.</small>
       </label>
+      <label>✂ Crop: <span id="cropLabel">full frame</span>
+        <div class="crop-row">
+          <button id="cropBtn" type="button" class="btn small" disabled
+                  title="Crop the current source to a region of interest">✂ Edit crop</button>
+        </div>
+        <small class="hint">Per source video — zoom to a region; applies to every event from this source and to exports. Small crops of low-res sources will look soft.</small>
+      </label>
       <label>Slow-motion: <span id="slowLabel">50%</span>
         <input id="slowSlider" type="range" min="10" max="100" step="5" value="50" />
         <small class="hint" id="slowHint">Plays at 50% of real speed (2× slower)</small>
@@ -97,6 +104,26 @@
            maps to a fraction of this 16:9 box = the final canvas. -->
       <div class="text-overlay-layer" id="textOverlayLayer"></div>
       <div class="overlay" id="overlayMsg">Pick a source video in Setup to begin</div>
+      <!-- Crop editor: draggable/resizable region over the paused full frame.
+           Hidden unless the user is editing the current source's crop. -->
+      <div class="crop-editor hidden" id="cropEditor">
+        <div class="crop-region" id="cropRegion">
+          <div class="crop-handle nw" data-h="nw"></div>
+          <div class="crop-handle n"  data-h="n"></div>
+          <div class="crop-handle ne" data-h="ne"></div>
+          <div class="crop-handle e"  data-h="e"></div>
+          <div class="crop-handle se" data-h="se"></div>
+          <div class="crop-handle s"  data-h="s"></div>
+          <div class="crop-handle sw" data-h="sw"></div>
+          <div class="crop-handle w"  data-h="w"></div>
+        </div>
+        <div class="crop-toolbar">
+          <label class="crop-free"><input id="cropFree" type="checkbox" /> Free aspect</label>
+          <button id="cropApply"  type="button" class="btn small primary">Apply</button>
+          <button id="cropClear"  type="button" class="btn small ghost">Reset</button>
+          <button id="cropCancel" type="button" class="btn small ghost">Cancel</button>
+        </div>
+      </div>
     </div>
 
     <!-- Custom timeline scrubber -->

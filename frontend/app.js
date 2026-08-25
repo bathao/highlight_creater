@@ -17,6 +17,14 @@ const els = {
   brightSlider: $("brightSlider"),
   brightLabel: $("brightLabel"),
   brightReset: $("brightReset"),
+  cropBtn: $("cropBtn"),
+  cropLabel: $("cropLabel"),
+  cropEditor: $("cropEditor"),
+  cropRegion: $("cropRegion"),
+  cropFree: $("cropFree"),
+  cropApply: $("cropApply"),
+  cropClear: $("cropClear"),
+  cropCancel: $("cropCancel"),
 
   player: $("player"),
   overlay: $("overlayMsg"),
@@ -128,6 +136,12 @@ const probeCache = {};   // video path -> probe info {width,height,fps,...}
 // Previewed live via a CSS filter on the player; the render maps the same
 // value onto ffmpeg's eq filter, so what you see is what gets burned in.
 let sourceAdjust = {};
+// Per-source crop: video path -> {x,y,w,h} fractions of the source frame
+// (top-left + size); absent = full frame. Previewed live via a CSS
+// transform + clip-path on the player; the render maps the same fractions
+// onto ffmpeg's crop filter, so what you see is what gets burned in.
+let sourceCrop = {};
+let cropEditing = false; // crop editor open (player shows the full frame)
 
 // Text overlays burned onto the final video. Each: {id,text,font,sizePct,
 // color,x,y,start,end,shadow}. x/y are the text CENTRE as a fraction of the
@@ -199,6 +213,7 @@ function saveState() {
       texts,
       music,
       sourceAdjust,
+      sourceCrop,
     }));
   } catch (e) { /* ignore */ }
 }
@@ -232,6 +247,10 @@ function loadState() {
     if (s.sourceAdjust && typeof s.sourceAdjust === "object") {
       sourceAdjust = {};
       for (const [path, v] of Object.entries(s.sourceAdjust)) setBrightness(path, v);
+    }
+    if (s.sourceCrop && typeof s.sourceCrop === "object") {
+      sourceCrop = {};
+      for (const [path, c] of Object.entries(s.sourceCrop)) setCrop(path, c);
     }
   } catch (e) { /* ignore */ }
 }
@@ -369,6 +388,102 @@ function updateBrightnessControl() {
   els.brightReset.classList.toggle("hidden", !v);
 }
 
+// ---- Per-source crop --------------------------------------------------
+const MIN_CROP_FRAC = 0.15; // smallest crop side (fraction of the source)
+
+function getCrop(path) {
+  return (path && sourceCrop[path]) || null;
+}
+
+// Clamp + store a crop; a ~full-frame crop deletes the key (mirrors
+// brightness deleting at 0) so the map stays sparse and old behaviour is
+// byte-identical when nothing is cropped.
+function setCrop(path, c) {
+  if (!path) return;
+  if (!c || typeof c !== "object") { delete sourceCrop[path]; return; }
+  let w = clampNum(c.w, MIN_CROP_FRAC, 1, 1);
+  let h = clampNum(c.h, MIN_CROP_FRAC, 1, 1);
+  let x = clampNum(c.x, 0, 1, 0);
+  let y = clampNum(c.y, 0, 1, 0);
+  x = Math.min(x, 1 - w);
+  y = Math.min(y, 1 - h);
+  const r4 = n => Math.round(n * 10000) / 10000;
+  if (w >= 0.999 && h >= 0.999) { delete sourceCrop[path]; return; }
+  sourceCrop[path] = { x: r4(x), y: r4(y), w: r4(w), h: r4(h) };
+}
+
+// ---- Geometry helpers (letterbox math) --------------------------------
+// Aspect-fit-center a box of innerW x innerH into boxW x boxH -> px rect.
+function fitRect(innerW, innerH, boxW, boxH, boxX = 0, boxY = 0) {
+  if (!innerW || !innerH || !boxW || !boxH) return null;
+  const k = Math.min(boxW / innerW, boxH / innerH);
+  const w = innerW * k, h = innerH * k;
+  return { x: boxX + (boxW - w) / 2, y: boxY + (boxH - h) / 2, w, h };
+}
+
+// Where the source picture actually shows inside the wrapper (the <video>
+// letterboxes via object-fit: contain). Needs loadedmetadata (videoWidth).
+function videoContentRect() {
+  const wrap = els.player.parentElement;
+  return fitRect(els.player.videoWidth, els.player.videoHeight,
+                 wrap.clientWidth, wrap.clientHeight);
+}
+
+// Aspect of the final output canvas = the FIRST clip's source, after its
+// crop (mirrors run_job). Probe comes from the cache (sync); 16:9 fallback
+// until the probe lands.
+function canvasAspect() {
+  const src = canvasSourceVideo();
+  const info = src && probeCache[src];
+  if (!info || !info.width || !info.height) return 16 / 9;
+  const c = getCrop(src);
+  return c ? (info.width * c.w) / (info.height * c.h) : info.width / info.height;
+}
+
+// The canvas' fit rect inside the wrapper — the target box for the crop
+// preview and the text-overlay layer.
+function canvasFitRect() {
+  const wrap = els.player.parentElement;
+  const a = canvasAspect();
+  return fitRect(a, 1, wrap.clientWidth, wrap.clientHeight);
+}
+
+// Live WYSIWYG crop preview: clip the source to the crop region (clip-path
+// works in the element's pre-transform box) and transform that region onto
+// its aspect-fit rect inside the canvas fit rect. The wrapper is already
+// black + overflow:hidden, so a free-aspect crop letterboxes for free.
+// Coexists with the brightness CSS filter (different properties). Cleared
+// while the crop editor is open (it must show the full frame).
+function applyPlayerCrop() {
+  const p = els.player;
+  const crop = getCrop(currentVideo);
+  const C = videoContentRect();
+  if (!crop || !C || cropEditing) {
+    p.style.transform = "";
+    p.style.transformOrigin = "";
+    p.style.clipPath = "";
+    return;
+  }
+  const rx = C.x + crop.x * C.w, ry = C.y + crop.y * C.h;
+  const rw = crop.w * C.w, rh = crop.h * C.h;
+  const T = canvasFitRect();
+  if (!T || rw < 2 || rh < 2) return;
+  const k = Math.min(T.w / rw, T.h / rh);
+  const tx = T.x + (T.w - rw * k) / 2, ty = T.y + (T.h - rh * k) / 2;
+  const W = p.clientWidth, H = p.clientHeight;
+  p.style.transformOrigin = "0 0";
+  p.style.transform = `translate(${(tx - rx * k).toFixed(2)}px, ${(ty - ry * k).toFixed(2)}px) scale(${k.toFixed(5)})`;
+  p.style.clipPath = `inset(${ry.toFixed(2)}px ${(W - rx - rw).toFixed(2)}px ${(H - ry - rh).toFixed(2)}px ${rx.toFixed(2)}px)`;
+}
+
+function updateCropControl() {
+  const c = getCrop(currentVideo);
+  els.cropBtn.disabled = !currentVideo;
+  els.cropLabel.textContent = c
+    ? `${Math.round(c.w * 100)}% × ${Math.round(c.h * 100)}% @ (${Math.round(c.x * 100)}%, ${Math.round(c.y * 100)}%)`
+    : "full frame";
+}
+
 // One pending "source finished loading" callback. Every source switch
 // invalidates it, so a rapid series of switches (preview segment skips,
 // event previews) can never leave stale loadeddata handlers behind that
@@ -389,6 +504,9 @@ function onSourceReady(fn) {
 
 async function selectVideo(path) {
   cancelSourceReady();
+  // A crop draft belongs to the source it was opened on — switching sources
+  // (event preview, project load, ...) closes the editor without committing.
+  if (cropEditing && path !== currentVideo) exitCropMode(false);
   // An I-mark taken on one source must not pair with an O-mark on another —
   // switching videos mid-capture cancels the capture.
   if (captureStart !== null && path !== currentVideo) {
@@ -404,7 +522,10 @@ async function selectVideo(path) {
     updatePickLabel();
     applyPlayerBrightness();
     updateBrightnessControl();
+    applyPlayerCrop();
+    updateCropControl();
     refreshResolutionOptions();
+    layoutOverlayLayer();
     renderTextOverlays();
     return;
   }
@@ -416,6 +537,12 @@ async function selectVideo(path) {
   updatePickLabel();
   applyPlayerBrightness();
   updateBrightnessControl();
+  // Crop transform needs videoWidth (loadedmetadata); clear it now so a
+  // rapid source switch can never flash the previous source's crop, then
+  // re-apply once this source's metadata lands.
+  applyPlayerCrop();
+  updateCropControl();
+  layoutOverlayLayer();
   renderTextOverlays();
   // Probe for fps / resolution
   const info = await probeVideo(path);
@@ -579,7 +706,11 @@ async function refreshResolutionOptions() {
   const info = await probeVideo(src);
   // Source may have changed while awaiting the probe.
   if (canvasSourceVideo() !== src) return;
-  const srcH = (info && info.height) ? info.height : 0;
+  // Effective canvas height = probe height x the canvas source's crop (the
+  // backend derives the canvas from the cropped first source the same way).
+  const crop = getCrop(src);
+  const srcH = (info && info.height)
+    ? Math.round(info.height * (crop ? crop.h : 1)) : 0;
   const avail = RES_TIERS.filter(t => t.h <= srcH + 1);
 
   sel.innerHTML = "";
@@ -667,6 +798,11 @@ els.player.addEventListener("timeupdate", updatePlayerTime);
 els.player.addEventListener("loadedmetadata", () => {
   updatePlayerTime();
   updateBuffered();
+  // Crop preview + overlay layout depend on videoWidth/videoHeight, which
+  // only exist from this event on.
+  applyPlayerCrop();
+  layoutOverlayLayer();
+  renderTextOverlays();
 });
 els.player.addEventListener("durationchange", () => {
   updatePlayerTime();
@@ -1616,6 +1752,87 @@ function hexToRgba(hex, a) {
   return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${isFinite(al) ? al : 0.45})`;
 }
 
+// Pin the overlay layer to the CANVAS' fit rect inside the wrapper (px), so
+// label fractions keep meaning "fraction of the final canvas" even when the
+// canvas isn't 16:9 (free-aspect crop, odd first source). Inline styles win
+// over the stylesheet's inset:0.
+function layoutOverlayLayer() {
+  const layer = els.textOverlayLayer;
+  if (!layer) return;
+  const T = canvasFitRect();
+  if (!T) {
+    // Drop all inline positioning -> the stylesheet's inset:0 takes over.
+    layer.style.inset = "";
+    layer.style.width = layer.style.height = "";
+    return;
+  }
+  layer.style.inset = "auto";
+  layer.style.left = `${T.x.toFixed(2)}px`;
+  layer.style.top = `${T.y.toFixed(2)}px`;
+  layer.style.width = `${T.w.toFixed(2)}px`;
+  layer.style.height = `${T.h.toFixed(2)}px`;
+}
+
+// Deterministic word-wrap shared by the preview AND the export. ffmpeg's
+// drawtext never wraps, and an absolutely-positioned label wraps wherever the
+// browser runs out of room — two different results. So we compute the line
+// breaks ourselves (canvas measureText with the same family/weight; Windows
+// Arial in the browser is the same arial.ttf ffmpeg draws with) and hand both
+// sides text with explicit "\n". Max width = the widest line that still fits
+// inside the frame when centred at t.x (the label can only extend to the
+// nearer edge), so wrapped text can never leave the picture.
+let _measureCtx = null;
+const TEXT_WRAP_FRAC = 0.96;   // max line width as a fraction of the canvas width
+const TEXT_LINE_HEIGHT = 1.15; // matches .tx-overlay line-height
+
+// Reference canvas (H = 1000 px, W from the canvas aspect) + the 2D context's
+// font set for this overlay. Returns {W, H, fontPx}.
+function textMeasureSetup(t, ctx) {
+  const H = 1000, W = H * canvasAspect();
+  const fontPx = (t.sizePct / 100) * H;
+  const fs = fontSpec(t.font);
+  ctx.font = `${t.italic ? "italic " : ""}${t.bold ? "bold " : ""}${fontPx}px ${fs.css}`;
+  return { W, H, fontPx };
+}
+
+// Size of the rendered (wrapped) text block as fractions of the canvas —
+// used by the position pad so a corner placement keeps the whole block
+// inside the frame instead of parking its CENTRE near the edge.
+function textBlockSize(t) {
+  if (!_measureCtx) _measureCtx = document.createElement("canvas").getContext("2d");
+  const ctx = _measureCtx;
+  if (!ctx) return { w: 0, h: 0 };
+  const { W, H, fontPx } = textMeasureSetup(t, ctx);
+  const lines = wrapTextForRender(t).split("\n");
+  const wPx = Math.max(0, ...lines.map(l => ctx.measureText(l).width));
+  return { w: Math.min(1, wPx / W), h: Math.min(1, (lines.length * fontPx * TEXT_LINE_HEIGHT) / H) };
+}
+
+function wrapTextForRender(t) {
+  const raw = String(t.text || "");
+  if (!raw.trim()) return raw;
+  if (!_measureCtx) _measureCtx = document.createElement("canvas").getContext("2d");
+  const ctx = _measureCtx;
+  if (!ctx) return raw;
+  const { W } = textMeasureSetup(t, ctx);
+  // A line may run almost the full frame width before it wraps (the user
+  // places the block; the preview shows exactly what the export will do).
+  const maxW = TEXT_WRAP_FRAC * W;
+  const out = [];
+  for (const para of raw.split("\n")) {              // keep manual breaks
+    const words = para.split(/\s+/).filter(Boolean);
+    if (!words.length) { out.push(""); continue; }
+    let line = words[0];
+    for (let i = 1; i < words.length; i++) {
+      const cand = `${line} ${words[i]}`;
+      if (ctx.measureText(cand).width <= maxW) line = cand;
+      else { out.push(line); line = words[i]; }    // over-long words stay whole
+    }
+    out.push(line);
+  }
+  return out.join("\n");
+}
+
 // (Re)build the draggable labels over the player. Font size is px relative to
 // the player box height so it matches what the % size will render to.
 function renderTextOverlays() {
@@ -1631,7 +1848,7 @@ function renderTextOverlays() {
     const el = document.createElement("div");
     el.className = "tx-overlay" + (t.id === selectedTextId ? " selected" : "");
     el.dataset.id = t.id;
-    el.textContent = t.text;
+    el.textContent = wrapTextForRender(t);   // same line breaks as the export
     el.style.left = `${t.x * 100}%`;
     el.style.top = `${t.y * 100}%`;
     el.style.fontFamily = fs.css;
@@ -1639,7 +1856,7 @@ function renderTextOverlays() {
     el.style.fontStyle = t.italic ? "italic" : "normal";
     el.style.color = t.color;
     el.style.fontSize = `${(t.sizePct / 100) * boxH}px`;
-    el.style.whiteSpace = "pre-line";   // honour newlines in multi-line text
+    el.style.whiteSpace = "pre";        // explicit newlines only — never auto-wrap
     el.style.textAlign = "center";
     el.style.textShadow = t.shadow
       ? "0 0 2px #000, 1px 1px 2px #000, -1px -1px 2px #000" : "none";
@@ -1968,9 +2185,15 @@ els.textList.addEventListener("click", (e) => {
   }
   if (act === "pos") {
     const p = btn.dataset.pos;  // "<row><col>", row t/m/b, col l/c/r
-    const yMap = { t: 0.10, m: 0.5, b: 0.88 };
-    const xMap = { l: 0.12, c: 0.5, r: 0.88 };
-    t.y = yMap[p[0]]; t.x = xMap[p[1]];
+    // Place the block so its EDGE sits `m` from the frame edge (x/y are the
+    // centre, so offset by half the measured block size) — a wide title sent
+    // to a corner stays fully inside the picture.
+    const m = 0.03;
+    const { w, h } = textBlockSize(t);
+    const yMap = { t: m + h / 2, m: 0.5, b: 1 - m - h / 2 };
+    const xMap = { l: m + w / 2, c: 0.5, r: 1 - m - w / 2 };
+    t.y = Math.max(h / 2, Math.min(1 - h / 2, yMap[p[0]]));
+    t.x = Math.max(w / 2, Math.min(1 - w / 2, xMap[p[1]]));
     renderTextOverlays();
     saveState();
     return;
@@ -2057,6 +2280,8 @@ function startInlineEdit(id, el) {
   selectedTextId = id;
   txEditId = id;
   el.classList.add("editing");
+  const t = texts.find(x => x.id === id);
+  if (t) el.textContent = t.text;     // raw text: auto-wrap breaks are display-only
   try { el.contentEditable = "plaintext-only"; }
   catch (_) { el.contentEditable = "true"; }
   el.focus();
@@ -2114,7 +2339,12 @@ els.textOverlayLayer.addEventListener("focusout", () => {
 });
 
 // Keep overlay font sizes correct when the player box resizes.
-window.addEventListener("resize", () => { if (texts.length) renderTextOverlays(); });
+window.addEventListener("resize", () => {
+  applyPlayerCrop();          // px-based transform tracks the wrapper size
+  layoutOverlayLayer();
+  if (cropEditing) positionCropRegion();
+  if (texts.length) renderTextOverlays();
+});
 
 // ---- Render summary -------------------------------------------------
 function refreshRenderSummary() {
@@ -2157,7 +2387,7 @@ function textsPayload() {
   return texts
     .filter(t => (t.text || "").trim())
     .map(t => ({
-      text: t.text, font: t.font, bold: !!t.bold, italic: !!t.italic,
+      text: wrapTextForRender(t), font: t.font, bold: !!t.bold, italic: !!t.italic,
       size_pct: t.sizePct, color: t.color,
       x: t.x, y: t.y, start: t.start, end: t.end, shadow: t.shadow !== false,
       box: !!t.box, box_color: t.boxColor, box_opacity: t.boxOpacity, fade: t.fade,
@@ -2174,7 +2404,7 @@ function currentProjectPayload(name) {
     intro_seconds: parseFloat(els.introSeconds.value || "4"),
     slow_percent: parseInt(els.slowSlider.value, 10),
     video: currentVideo || (clips[0] && clips[0].video) || "",
-    clips: clips.map(c => ({ start: c.start, end: c.end, slowmo: c.slowmo !== false, video: c.video || "", brightness: getBrightness(c.video) })),
+    clips: clips.map(c => ({ start: c.start, end: c.end, slowmo: c.slowmo !== false, video: c.video || "", brightness: getBrightness(c.video), crop: getCrop(c.video) })),
     texts: texts.map(t => ({
       text: t.text, font: t.font, bold: !!t.bold, italic: !!t.italic,
       sizePct: t.sizePct, color: t.color,
@@ -2202,10 +2432,15 @@ function applyProjectPayload(p) {
     // Migration: old projects stored clips without `video` (single-source) -> backfill.
     video: c.video || p.video || "",
   }));
-  // Rebuild the per-source brightness map from the clips' stored values
-  // (old projects without `brightness` -> no adjustment).
+  // Rebuild the per-source brightness + crop maps from the clips' stored
+  // values (old projects without `brightness`/`crop` -> no adjustment).
   sourceAdjust = {};
-  (p.clips || []).forEach(c => setBrightness(c.video || p.video || "", c.brightness));
+  sourceCrop = {};
+  (p.clips || []).forEach(c => {
+    const src = c.video || p.video || "";
+    setBrightness(src, c.brightness);
+    if (c.crop) setCrop(src, c.crop);
+  });
   // Text overlays (old projects without `texts` -> none).
   texts = (p.texts || []).map(normalizeText);
   selectedTextId = null;
@@ -2310,6 +2545,7 @@ function newProject() {
   musicAuditioning = false;
   clipUndoStack = [];
   sourceAdjust = {};
+  sourceCrop = {};
 
   // Project name + selection.
   els.projectName.value = "";
@@ -2419,6 +2655,7 @@ async function exportSingleClip(clip, includeSlowmo) {
       label: `clip${idx}`,
       out_height: outHeight || 0,
       brightness: getBrightness(clipVideo),
+      crop: getCrop(clipVideo),
     };
     const res = await fetch("/api/export-clip", {
       method: "POST",
@@ -2464,7 +2701,7 @@ async function startRender() {
   try {
     const body = {
       video: currentVideo || (clips[0] && clips[0].video) || "",
-      clips: clips.map(c => ({ start: c.start, end: c.end, slowmo: c.slowmo !== false, video: c.video, brightness: getBrightness(c.video) })),
+      clips: clips.map(c => ({ start: c.start, end: c.end, slowmo: c.slowmo !== false, video: c.video, brightness: getBrightness(c.video), crop: getCrop(c.video) })),
       slow_percent: parseInt(els.slowSlider.value, 10),
       intro_seconds: parseFloat(els.introSeconds.value || "0"),
       tournament: els.tournament.value,
@@ -2605,7 +2842,8 @@ els.browsePath.addEventListener("keydown", (e) => {
 });
 document.addEventListener("keydown", (e) => {
   if (e.key !== "Escape") return;
-  if (!els.browseModal.classList.contains("hidden")) closeBrowse();
+  if (cropEditing) exitCropMode(false);
+  else if (!els.browseModal.classList.contains("hidden")) closeBrowse();
   else if (pvMode) pvExit();
 });
 
@@ -2624,6 +2862,150 @@ els.brightReset.addEventListener("click", () => {
   updateBrightnessControl();
   saveState();
 });
+
+// ---- Crop editor ------------------------------------------------------
+// A draggable/resizable rectangle over the paused FULL frame. The draft
+// lives in source fractions and is only committed on Apply. "Locked" keeps
+// the region at the source's own aspect — equal width/height FRACTIONS —
+// so an applied crop is a pure zoom+pan (no letterbox). Free aspect (the
+// checkbox, or holding Shift) allows any rectangle; the render letterboxes.
+let cropDraft = null;   // {x,y,w,h} fractions of the source frame
+let cropDrag = null;    // {mode:"move"|handle, mx, my, start:{...}}
+
+function positionCropRegion() {
+  const C = videoContentRect();
+  if (!C || !cropDraft) return;
+  const r = els.cropRegion.style;
+  r.left = `${(C.x + cropDraft.x * C.w).toFixed(1)}px`;
+  r.top = `${(C.y + cropDraft.y * C.h).toFixed(1)}px`;
+  r.width = `${(cropDraft.w * C.w).toFixed(1)}px`;
+  r.height = `${(cropDraft.h * C.h).toFixed(1)}px`;
+}
+
+function enterCropMode() {
+  if (!currentVideo) return;
+  if (pvMode) pvExit();               // editing mid-preview would be ambiguous
+  if (!videoContentRect()) {
+    flashTopMessage("Video is still loading — try again in a moment");
+    return;
+  }
+  els.player.pause();
+  cropEditing = true;
+  applyPlayerCrop();                  // clears the zoom -> full frame visible
+  const c = getCrop(currentVideo);
+  cropDraft = c ? { ...c } : { x: 0.1, y: 0.1, w: 0.8, h: 0.8 };
+  els.cropFree.checked = !!c && Math.abs(c.w - c.h) > 0.001;
+  els.cropEditor.classList.remove("hidden");
+  positionCropRegion();
+}
+
+function exitCropMode(commit) {
+  if (!cropEditing) return;
+  if (commit) setCrop(currentVideo, cropDraft);
+  cropEditing = false;
+  cropDraft = null;
+  cropDrag = null;
+  els.cropEditor.classList.add("hidden");
+  applyPlayerCrop();
+  updateCropControl();
+  if (commit) {
+    refreshResolutionOptions();       // effective height may have changed
+    layoutOverlayLayer();
+    renderTextOverlays();
+    refreshRenderSummary();
+    saveState();
+  }
+}
+
+// Resize the draft by a handle drag. fx/fy = mouse delta in source fractions;
+// s = rect at drag start. Locked = equal w/h fractions (source aspect).
+function resizeCropDraft(hdl, fx, fy, locked, s) {
+  let L = s.x, T = s.y, R = s.x + s.w, B = s.y + s.h;
+  if (hdl.includes("w")) L = Math.min(Math.max(0, L + fx), R - MIN_CROP_FRAC);
+  if (hdl.includes("e")) R = Math.max(Math.min(1, R + fx), L + MIN_CROP_FRAC);
+  if (hdl.includes("n")) T = Math.min(Math.max(0, T + fy), B - MIN_CROP_FRAC);
+  if (hdl.includes("s")) B = Math.max(Math.min(1, B + fy), T + MIN_CROP_FRAC);
+  if (locked) {
+    const horiz = hdl === "e" || hdl === "w";
+    const vert = hdl === "n" || hdl === "s";
+    let v = horiz ? (R - L) : vert ? (B - T)
+      : (Math.abs(fx) > Math.abs(fy) ? (R - L) : (B - T));
+    if (horiz || vert) {
+      // Edge handle: size the perpendicular axis around its centre.
+      const cx = (L + R) / 2, cy = (T + B) / 2;
+      if (horiz) v = Math.min(v, 2 * Math.min(cy, 1 - cy));
+      else v = Math.min(v, 2 * Math.min(cx, 1 - cx));
+      v = Math.max(MIN_CROP_FRAC, v);
+      if (horiz) {
+        if (hdl === "w") L = R - v; else R = L + v;
+        T = cy - v / 2; B = cy + v / 2;
+      } else {
+        if (hdl === "n") T = B - v; else B = T + v;
+        L = cx - v / 2; R = cx + v / 2;
+      }
+    } else {
+      // Corner handle: the opposite corner stays anchored.
+      const ax = hdl.includes("w") ? R : L;
+      const ay = hdl.includes("n") ? B : T;
+      v = Math.min(v,
+        hdl.includes("w") ? ax : 1 - ax,
+        hdl.includes("n") ? ay : 1 - ay);
+      v = Math.max(MIN_CROP_FRAC, v);
+      L = hdl.includes("w") ? ax - v : ax; R = L + v;
+      T = hdl.includes("n") ? ay - v : ay; B = T + v;
+    }
+  }
+  return { x: L, y: T, w: R - L, h: B - T };
+}
+
+els.cropEditor.addEventListener("mousedown", (e) => {
+  if (!cropEditing || e.button !== 0) return;
+  const hdl = e.target.dataset && e.target.dataset.h;
+  const onRegion = e.target === els.cropRegion;
+  if (!hdl && !onRegion) return;      // toolbar / empty area
+  e.preventDefault();
+  cropDrag = { mode: hdl || "move", mx: e.clientX, my: e.clientY, start: { ...cropDraft } };
+});
+window.addEventListener("mousemove", (e) => {
+  if (!cropDrag || !cropEditing) return;
+  const C = videoContentRect();
+  if (!C) return;
+  const fx = (e.clientX - cropDrag.mx) / C.w;
+  const fy = (e.clientY - cropDrag.my) / C.h;
+  const s = cropDrag.start;
+  if (cropDrag.mode === "move") {
+    cropDraft = {
+      ...s,
+      x: Math.max(0, Math.min(1 - s.w, s.x + fx)),
+      y: Math.max(0, Math.min(1 - s.h, s.y + fy)),
+    };
+  } else {
+    const locked = !els.cropFree.checked && !e.shiftKey;
+    cropDraft = resizeCropDraft(cropDrag.mode, fx, fy, locked, s);
+  }
+  positionCropRegion();
+});
+window.addEventListener("mouseup", () => { cropDrag = null; });
+
+els.cropBtn.addEventListener("click", () => {
+  if (cropEditing) exitCropMode(false); else enterCropMode();
+});
+els.cropApply.addEventListener("click", () => exitCropMode(true));
+els.cropClear.addEventListener("click", () => {
+  cropDraft = null;                   // commit "no crop"
+  exitCropMode(true);
+});
+els.cropCancel.addEventListener("click", () => exitCropMode(false));
+// Re-snap to the source aspect when the user locks back.
+els.cropFree.addEventListener("change", () => {
+  if (!cropEditing || els.cropFree.checked || !cropDraft) return;
+  const v = Math.max(MIN_CROP_FRAC, Math.min(cropDraft.w, cropDraft.h));
+  const cx = Math.min(Math.max(cropDraft.x + cropDraft.w / 2, v / 2), 1 - v / 2);
+  const cy = Math.min(Math.max(cropDraft.y + cropDraft.h / 2, v / 2), 1 - v / 2);
+  cropDraft = { x: cx - v / 2, y: cy - v / 2, w: v, h: v };
+  positionCropRegion();
+});
+
 els.resolutionSelect.addEventListener("change", (e) => {
   outHeight = parseInt(e.target.value, 10) || 0;
   saveState();
@@ -2681,6 +3063,7 @@ document.addEventListener("keydown", (e) => {
   const tag = (e.target.tagName || "").toLowerCase();
   if (tag === "input" || tag === "textarea" || tag === "select") return;
   if (e.target.isContentEditable) return;
+  if (cropEditing) return;  // the crop editor owns the keyboard (Esc handled above)
 
   if (!els.player.src) return;
 

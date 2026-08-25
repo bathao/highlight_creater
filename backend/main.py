@@ -347,9 +347,13 @@ def _native_pick(initial_dir: str) -> Optional[str]:
     """)
     env = dict(os.environ, HC_PICK_INITDIR=initial_dir or "")
     try:
+        # -X utf8 + encoding="utf-8": the child prints the chosen path on a
+        # piped stdout, which otherwise uses the ANSI codepage — non-ASCII
+        # filenames (e.g. Vietnamese diacritics) would crash the helper with
+        # UnicodeEncodeError and the picker would fall back to the modal.
         proc = subprocess.run(
-            [sys.executable, "-c", helper],
-            capture_output=True, text=True, timeout=600, env=env,
+            [sys.executable, "-X", "utf8", "-c", helper],
+            capture_output=True, text=True, encoding="utf-8", timeout=600, env=env,
             creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
         )
     except Exception:
@@ -503,6 +507,9 @@ class ProjectClip(BaseModel):
     slowmo: bool = True
     video: str = ""  # source video for this clip (multi-source projects)
     brightness: float = 0.0  # per-source brightness percent (-50..+50)
+    # Round-trip container like texts/music — no bounds; render requests
+    # validate through CropModel instead.
+    crop: Optional[dict] = None  # per-source crop {x,y,w,h} fractions
 
 
 class ProjectPayload(BaseModel):
@@ -580,12 +587,23 @@ async def delete_project(name: str) -> JSONResponse:
 # --------------------------------------------------------------------------
 # Render job API
 # --------------------------------------------------------------------------
+class CropModel(BaseModel):
+    """Per-source crop region as fractions of the source frame. Bounds are
+    kept loose here — the hard clamp (min size, even pixels, x+w<=1) lives in
+    render._crop_pixels so float drift from JSON round-trips never 422s."""
+    x: float = Field(ge=0, le=1, default=0.0)
+    y: float = Field(ge=0, le=1, default=0.0)
+    w: float = Field(ge=0.1, le=1, default=1.0)
+    h: float = Field(ge=0.1, le=1, default=1.0)
+
+
 class ClipModel(BaseModel):
     start: float = Field(ge=0)
     end: float = Field(gt=0)
     slowmo: bool = True
     video: str = ""  # source video for this clip; falls back to RenderRequest.video
     brightness: float = Field(ge=-50, le=50, default=0)  # per-source brightness (%)
+    crop: Optional[CropModel] = None  # per-source crop region; None = full frame
 
 
 class TextOverlayModel(BaseModel):
@@ -638,6 +656,7 @@ class ExportClipRequest(BaseModel):
     label: str = ""
     out_height: int = Field(ge=0, le=2160, default=0)  # 0 = native source height
     brightness: float = Field(ge=-50, le=50, default=0)  # per-source brightness (%)
+    crop: Optional[CropModel] = None  # per-source crop region; None = full frame
 
 
 @app.post("/api/export-clip")
@@ -651,7 +670,8 @@ async def export_clip(req: ExportClipRequest) -> JSONResponse:
     video_path = _safe_source_path(req.video)
 
     clip = render.Clip(start=req.start, end=req.end, slowmo=req.include_slowmo,
-                       video_path=video_path, brightness=req.brightness)
+                       video_path=video_path, brightness=req.brightness,
+                       crop=req.crop.model_dump() if req.crop else None)
 
     stem = Path(req.video).stem
     raw_label = req.label.strip() or f"t{req.start:.1f}-t{req.end:.1f}"
@@ -703,7 +723,8 @@ async def start_render(req: RenderRequest) -> JSONResponse:
             raise HTTPException(400, f"Invalid clip {c.start}-{c.end}")
         src = resolve(c.video or req.video)
         clips.append(render.Clip(start=c.start, end=c.end, slowmo=c.slowmo,
-                                 video_path=src, brightness=c.brightness))
+                                 video_path=src, brightness=c.brightness,
+                                 crop=c.crop.model_dump() if c.crop else None))
 
     # Text overlays: keep only those with actual content (cap defensively).
     texts = [
