@@ -1,6 +1,6 @@
 # TODO — Highlight Creator
 
-> Open work items, ordered by priority. Last synced against the code: 2026-08-25 (v1.8, uncommitted — manual crop checklist pending).
+> Open work items, ordered by priority. Last synced against the code: 2026-08-25 (v1.8.1, `598d616` — manual crop checklist pending).
 > See [progress.md](progress.md) for everything already done.
 
 ---
