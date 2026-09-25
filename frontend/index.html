@@ -72,7 +72,11 @@
                  title="Brighten or darken the current source video" />
           <button id="brightReset" type="button" class="btn small ghost hidden" title="Reset brightness">↺</button>
         </div>
-        <small class="hint">Per source video — applies to every event from the video above, live in the player and burned into the export.</small>
+        <span class="bright-all" title="Use one brightness for every source video — the ones already added and any you pick from now on">
+          <input id="brightAll" type="checkbox" />
+          <span id="brightAllText">Apply to all sources</span>
+        </span>
+        <small id="brightHint" class="hint">Per source video — applies to every event from the video above, live in the player and burned into the export.</small>
       </label>
       <label>✂ Crop: <span id="cropLabel">full frame</span>
         <div class="crop-row">

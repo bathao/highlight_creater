@@ -525,6 +525,10 @@ class ProjectPayload(BaseModel):
     # file is a round-trip container, not a render request, so no validation.
     texts: List[dict] = []
     music: Optional[dict] = None
+    # "Apply to all sources" brightness (percent); None = per-source mode.
+    # Clips already carry the effective per-clip brightness for rendering;
+    # this only lets the UI restore the mode on load.
+    brightness_all: Optional[int] = None
 
 
 def _safe_project_path(name: str) -> Path:

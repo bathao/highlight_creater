@@ -17,6 +17,9 @@ const els = {
   brightSlider: $("brightSlider"),
   brightLabel: $("brightLabel"),
   brightReset: $("brightReset"),
+  brightAll: $("brightAll"),
+  brightAllText: $("brightAllText"),
+  brightHint: $("brightHint"),
   cropBtn: $("cropBtn"),
   cropLabel: $("cropLabel"),
   cropEditor: $("cropEditor"),
@@ -136,6 +139,11 @@ const probeCache = {};   // video path -> probe info {width,height,fps,...}
 // Previewed live via a CSS filter on the player; the render maps the same
 // value onto ffmpeg's eq filter, so what you see is what gets burned in.
 let sourceAdjust = {};
+// "Apply to all sources" brightness: null = off (per-source mode above);
+// a number = every source without its own entry -- including sources
+// picked later -- inherits this value. While it is on, `sourceAdjust` is
+// kept empty so the global value is the single source of truth.
+let brightnessAll = null;
 // Per-source crop: video path -> {x,y,w,h} fractions of the source frame
 // (top-left + size); absent = full frame. Previewed live via a CSS
 // transform + clip-path on the player; the render maps the same fractions
@@ -213,6 +221,7 @@ function saveState() {
       texts,
       music,
       sourceAdjust,
+      brightnessAll,
       sourceCrop,
     }));
   } catch (e) { /* ignore */ }
@@ -248,6 +257,8 @@ function loadState() {
       sourceAdjust = {};
       for (const [path, v] of Object.entries(s.sourceAdjust)) setBrightness(path, v);
     }
+    brightnessAll = typeof s.brightnessAll === "number" ? clampBrightness(s.brightnessAll) : null;
+    if (brightnessAll !== null) sourceAdjust = {};
     if (s.sourceCrop && typeof s.sourceCrop === "object") {
       sourceCrop = {};
       for (const [path, c] of Object.entries(s.sourceCrop)) setCrop(path, c);
@@ -362,14 +373,58 @@ function updatePickLabel() {
 }
 
 // ---- Per-source brightness ------------------------------------------
+function clampBrightness(v) {
+  return Math.max(-50, Math.min(50, Math.round(Number(v) || 0)));
+}
+
+// A source's own value wins; otherwise the "apply to all" value (if on).
 function getBrightness(path) {
-  return (path && sourceAdjust[path]) || 0;
+  if (!path) return 0;
+  if (Object.prototype.hasOwnProperty.call(sourceAdjust, path)) return sourceAdjust[path];
+  return brightnessAll === null ? 0 : brightnessAll;
 }
 
 function setBrightness(path, v) {
   if (!path) return;
-  v = Math.max(-50, Math.min(50, Math.round(Number(v) || 0)));
+  v = clampBrightness(v);
   if (v) sourceAdjust[path] = v; else delete sourceAdjust[path];
+}
+
+// Every source path the project currently knows about (events + the one
+// in the player) -- used when leaving "apply to all" mode so each source
+// keeps the value it was showing.
+function knownSourcePaths() {
+  const set = new Set(clips.map(c => c.video).filter(Boolean));
+  if (currentVideo) set.add(currentVideo);
+  return [...set];
+}
+
+// Switch "apply to all sources" on/off without changing what any source
+// currently shows: on = the current source's value becomes the global one;
+// off = the global value is written into every known source.
+function setBrightnessAllMode(on) {
+  if (on) {
+    if (brightnessAll !== null) return;
+    brightnessAll = getBrightness(currentVideo);
+    sourceAdjust = {};
+  } else {
+    if (brightnessAll === null) return;
+    const v = brightnessAll;
+    brightnessAll = null;
+    sourceAdjust = {};
+    knownSourcePaths().forEach(p => setBrightness(p, v));
+  }
+}
+
+// Slider/reset target: the global value in "all" mode, else the current source.
+function setBrightnessFromControl(v) {
+  if (brightnessAll !== null) {
+    brightnessAll = clampBrightness(v);
+    sourceAdjust = {};
+  } else {
+    if (!currentVideo) return;
+    setBrightness(currentVideo, v);
+  }
 }
 
 // Live preview of the adjustment on whatever source the player is showing —
@@ -381,11 +436,19 @@ function applyPlayerBrightness() {
 }
 
 function updateBrightnessControl() {
-  const v = getBrightness(currentVideo);
-  els.brightSlider.disabled = !currentVideo;
+  const all = brightnessAll !== null;
+  const v = all ? brightnessAll : getBrightness(currentVideo);
+  els.brightSlider.disabled = !all && !currentVideo;
   els.brightSlider.value = v;
   els.brightLabel.textContent = v > 0 ? `+${v}%` : `${v}%`;
   els.brightReset.classList.toggle("hidden", !v);
+  els.brightAll.checked = all;
+  els.brightSlider.title = all
+    ? "Brighten or darken every source video (current and added later)"
+    : "Brighten or darken the current source video";
+  els.brightHint.textContent = all
+    ? "All sources — applies to every event from every source video, including videos you pick later; live in the player and burned into the export."
+    : "Per source video — applies to every event from the video above, live in the player and burned into the export.";
 }
 
 // ---- Per-source crop --------------------------------------------------
@@ -2405,6 +2468,7 @@ function currentProjectPayload(name) {
     slow_percent: parseInt(els.slowSlider.value, 10),
     video: currentVideo || (clips[0] && clips[0].video) || "",
     clips: clips.map(c => ({ start: c.start, end: c.end, slowmo: c.slowmo !== false, video: c.video || "", brightness: getBrightness(c.video), crop: getCrop(c.video) })),
+    brightness_all: brightnessAll,
     texts: texts.map(t => ({
       text: t.text, font: t.font, bold: !!t.bold, italic: !!t.italic,
       sizePct: t.sizePct, color: t.color,
@@ -2441,6 +2505,9 @@ function applyProjectPayload(p) {
     setBrightness(src, c.brightness);
     if (c.crop) setCrop(src, c.crop);
   });
+  // "Apply to all" brightness (old projects without it -> per-source mode).
+  brightnessAll = typeof p.brightness_all === "number" ? clampBrightness(p.brightness_all) : null;
+  if (brightnessAll !== null) sourceAdjust = {};
   // Text overlays (old projects without `texts` -> none).
   texts = (p.texts || []).map(normalizeText);
   selectedTextId = null;
@@ -2545,6 +2612,7 @@ function newProject() {
   musicAuditioning = false;
   clipUndoStack = [];
   sourceAdjust = {};
+  brightnessAll = null;
   sourceCrop = {};
 
   // Project name + selection.
@@ -2849,18 +2917,31 @@ document.addEventListener("keydown", (e) => {
 
 els.slowSlider.addEventListener("input", updateSlowLabel);
 els.brightSlider.addEventListener("input", (e) => {
-  if (!currentVideo) return;
-  setBrightness(currentVideo, e.target.value);
+  if (brightnessAll === null && !currentVideo) return;
+  setBrightnessFromControl(e.target.value);
   applyPlayerBrightness();
   updateBrightnessControl();
   saveState();
 });
 els.brightReset.addEventListener("click", () => {
-  if (!currentVideo) return;
-  setBrightness(currentVideo, 0);
+  if (brightnessAll === null && !currentVideo) return;
+  setBrightnessFromControl(0);
   applyPlayerBrightness();
   updateBrightnessControl();
   saveState();
+});
+els.brightAll.addEventListener("change", (e) => {
+  setBrightnessAllMode(e.target.checked);
+  applyPlayerBrightness();
+  updateBrightnessControl();
+  saveState();
+});
+// The checkbox sits inside the Brightness <label>, whose implicit control is
+// the slider -- so clicking its caption must toggle the box by hand.
+els.brightAllText.addEventListener("click", (e) => {
+  e.preventDefault();
+  els.brightAll.checked = !els.brightAll.checked;
+  els.brightAll.dispatchEvent(new Event("change"));
 });
 
 // ---- Crop editor ------------------------------------------------------

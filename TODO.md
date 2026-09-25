@@ -1,6 +1,6 @@
 # TODO — Highlight Creator
 
-> Open work items, ordered by priority. Last synced against the code: 2026-08-25 (v1.8.1, `598d616` — manual crop checklist pending).
+> Open work items, ordered by priority. Last synced against the code: 2026-09-24 (v1.9 — "apply to all sources" brightness, uncommitted on top of `090adb3`; the v1.8.1 build has been in production use 2026-09-11 → 2026-09-23 (19 renders in `workspace/output/`); manual crop checklist still pending).
 > See [progress.md](progress.md) for everything already done.
 
 ---
@@ -29,7 +29,8 @@
 - [ ] **Job history** persisted to `workspace/jobs/{job_id}.json`
   - Job state currently lives only in RAM (`_JOBS` dict) — closing the tab loses it
   - List the 10 most recent jobs in the UI, click to open the output
-  - 💡 Quickest first step: the backend already has `GET /api/outputs` ([backend/main.py:483](backend/main.py#L483)) listing rendered files — the frontend **still doesn't call it**. Wire that into the UI before building full job history
+  - 💡 Quickest first step: the backend already has `GET /api/outputs` ([backend/main.py:487](backend/main.py#L487)) listing rendered files — the frontend **still doesn't call it**. Wire that into the UI before building full job history
+  - 📈 Now urgent in practice: as of 2026-09-24 there are 19 rendered files (~3.6 GB, 8 full renders + 11 per-event exports) in `workspace/output/` with no way to list, open or delete them from the UI
 
 - [ ] **Audio normalize** with the `loudnorm` filter
   - `sounds/slow_motion.mp3` can be much louder/quieter than the source audio — normalize both to the same LUFS
@@ -108,6 +109,7 @@
 
 Summary: full render pipeline (intro + real + slow-mo + concat), NVENC, byte-range streaming, SSE progress, project CRUD, custom timeline + control bar, keyboard shortcuts, auto-persisted state, single-clip export, 1-click `start.bat` launcher.
 
+- **v1.9 (2026-09-24):** "Apply to all sources" brightness checkbox — one value inherited by every current and later-added source; persisted (`brightnessAll` / project `brightness_all`); 20/20 headless UI checks. Uncommitted.
 - **v1.8.1 (2026-08-25):** text overlays — deterministic wrap shared by preview + export, one drawtext per line (ffmpeg 8 newline-glyph bug), CRLF/LF fix, block-aware position pad
 - **v1.8 (2026-08-25):** per-source crop / zoom-to-region (aspect-locked by default, free-aspect toggle, live WYSIWYG preview, burned into all exports); fix: native file picker crashed on filenames with Vietnamese diacritics (UTF-8 subprocess)
 
