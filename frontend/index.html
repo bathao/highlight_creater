@@ -7,6 +7,25 @@
 <link rel="stylesheet" href="/static/style.css" />
 </head>
 <body>
+<!-- Smart-brightness preview filter: per-channel linear (contrast + gain) ->
+     per-channel gamma -> luma-preserving saturate. Attributes are set by
+     applyPlayerBrightness(); sRGB interpolation so the maths runs on the
+     same gamma-encoded values as the ffmpeg export chain. -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+  <filter id="colorFx" color-interpolation-filters="sRGB" x="0" y="0" width="100%" height="100%">
+    <feComponentTransfer id="fxLin">
+      <feFuncR type="linear" slope="1" intercept="0" />
+      <feFuncG type="linear" slope="1" intercept="0" />
+      <feFuncB type="linear" slope="1" intercept="0" />
+    </feComponentTransfer>
+    <feComponentTransfer id="fxGam">
+      <feFuncR type="gamma" amplitude="1" exponent="1" offset="0" />
+      <feFuncG type="gamma" amplitude="1" exponent="1" offset="0" />
+      <feFuncB type="gamma" amplitude="1" exponent="1" offset="0" />
+    </feComponentTransfer>
+    <feColorMatrix id="fxSat" type="saturate" values="1" />
+  </filter>
+</svg>
 
 <header class="topbar">
   <div class="brand">
@@ -69,14 +88,21 @@
       <label>☀ Brightness: <span id="brightLabel">0%</span>
         <div class="bright-row">
           <input id="brightSlider" type="range" min="-50" max="50" step="5" value="0" disabled
-                 title="Brighten or darken the current source video" />
+                 title="Brighten or darken the current source video — the rest of the look is automatic" />
           <button id="brightReset" type="button" class="btn small ghost hidden" title="Reset brightness">↺</button>
+          <button id="brightAutoBtn" type="button" class="btn small" disabled
+                  title="Measure the frame shown and pick the brightness level that puts its mid-tones at a well-exposed level — you can still nudge the slider afterwards">✨ Auto</button>
         </div>
         <span class="bright-all" title="Use one brightness for every source video — the ones already added and any you pick from now on">
           <input id="brightAll" type="checkbox" />
           <span id="brightAllText">Apply to all sources</span>
         </span>
-        <small id="brightHint" class="hint">Per source video — applies to every event from the video above, live in the player and burned into the export.</small>
+        <div class="bright-auto">
+          <small id="brightAuto" class="hint">Auto: gamma, contrast, colour and gain follow the slider</small>
+          <button id="brightAnalyze" type="button" class="btn small ghost" disabled
+                  title="Re-measure highlight headroom and colour from the frame shown in the player (pause on a typical frame first)">◎ Analyse frame</button>
+        </div>
+        <small id="brightHint" class="hint">Per source video — pick the level by eye; gamma, contrast, colour and gain are set automatically from the footage. Live in the player, burned into the export.</small>
       </label>
       <label>✂ Crop: <span id="cropLabel">full frame</span>
         <div class="crop-row">

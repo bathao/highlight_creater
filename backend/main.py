@@ -510,6 +510,7 @@ class ProjectClip(BaseModel):
     # Round-trip container like texts/music — no bounds; render requests
     # validate through CropModel instead.
     crop: Optional[dict] = None  # per-source crop {x,y,w,h} fractions
+    color: Optional[dict] = None  # derived smart-brightness look (round-trip only)
 
 
 class ProjectPayload(BaseModel):
@@ -529,6 +530,10 @@ class ProjectPayload(BaseModel):
     # Clips already carry the effective per-clip brightness for rendering;
     # this only lets the UI restore the mode on load.
     brightness_all: Optional[int] = None
+    # Per-source frame measurements the smart-brightness derivation uses
+    # ({path: {p99, sat, mean}}), so a reloaded project previews and renders
+    # the same look. Round-trip only.
+    source_stats: Optional[dict] = None
 
 
 def _safe_project_path(name: str) -> Path:
@@ -601,12 +606,23 @@ class CropModel(BaseModel):
     h: float = Field(ge=0.1, le=1, default=1.0)
 
 
+class ColorModel(BaseModel):
+    """Smart-brightness look the frontend derived from the brightness level
+    (+ its frame analysis). Bounds are generous safety rails, not the UI's
+    range; see render.derive_color for the real mapping."""
+    gain: float = Field(ge=0.5, le=1.6, default=1.0)
+    gamma: float = Field(ge=0.5, le=2.0, default=1.0)
+    contrast: float = Field(ge=0.7, le=1.4, default=1.0)
+    saturation: float = Field(ge=0.0, le=2.0, default=1.0)
+
+
 class ClipModel(BaseModel):
     start: float = Field(ge=0)
     end: float = Field(gt=0)
     slowmo: bool = True
     video: str = ""  # source video for this clip; falls back to RenderRequest.video
     brightness: float = Field(ge=-50, le=50, default=0)  # per-source brightness (%)
+    color: Optional[ColorModel] = None  # derived look; None = derive from brightness
     crop: Optional[CropModel] = None  # per-source crop region; None = full frame
 
 
@@ -660,6 +676,7 @@ class ExportClipRequest(BaseModel):
     label: str = ""
     out_height: int = Field(ge=0, le=2160, default=0)  # 0 = native source height
     brightness: float = Field(ge=-50, le=50, default=0)  # per-source brightness (%)
+    color: Optional[ColorModel] = None  # derived look; None = derive from brightness
     crop: Optional[CropModel] = None  # per-source crop region; None = full frame
 
 
@@ -675,6 +692,7 @@ async def export_clip(req: ExportClipRequest) -> JSONResponse:
 
     clip = render.Clip(start=req.start, end=req.end, slowmo=req.include_slowmo,
                        video_path=video_path, brightness=req.brightness,
+                       color=req.color.model_dump() if req.color else None,
                        crop=req.crop.model_dump() if req.crop else None)
 
     stem = Path(req.video).stem
@@ -728,6 +746,7 @@ async def start_render(req: RenderRequest) -> JSONResponse:
         src = resolve(c.video or req.video)
         clips.append(render.Clip(start=c.start, end=c.end, slowmo=c.slowmo,
                                  video_path=src, brightness=c.brightness,
+                                 color=c.color.model_dump() if c.color else None,
                                  crop=c.crop.model_dump() if c.crop else None))
 
     # Text overlays: keep only those with actual content (cap defensively).

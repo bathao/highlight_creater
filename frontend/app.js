@@ -20,6 +20,12 @@ const els = {
   brightAll: $("brightAll"),
   brightAllText: $("brightAllText"),
   brightHint: $("brightHint"),
+  brightAuto: $("brightAuto"),
+  brightAnalyze: $("brightAnalyze"),
+  brightAutoBtn: $("brightAutoBtn"),
+  fxLin: $("fxLin"),
+  fxGam: $("fxGam"),
+  fxSat: $("fxSat"),
   cropBtn: $("cropBtn"),
   cropLabel: $("cropLabel"),
   cropEditor: $("cropEditor"),
@@ -144,6 +150,12 @@ let sourceAdjust = {};
 // picked later -- inherits this value. While it is on, `sourceAdjust` is
 // kept empty so the global value is the single source of truth.
 let brightnessAll = null;
+// Per-source frame measurements for smart brightness: video path ->
+// {p99, sat, mean} (99th-percentile luma, mean HSV saturation, mean luma,
+// all 0..1) taken from the frame shown in the player. deriveColor() turns
+// the brightness level + these into the gamma/contrast/saturation/gain the
+// player previews and the export burns in. Missing = neutral profile.
+let sourceStats = {};
 // Per-source crop: video path -> {x,y,w,h} fractions of the source frame
 // (top-left + size); absent = full frame. Previewed live via a CSS
 // transform + clip-path on the player; the render maps the same fractions
@@ -222,6 +234,7 @@ function saveState() {
       music,
       sourceAdjust,
       brightnessAll,
+      sourceStats,
       sourceCrop,
     }));
   } catch (e) { /* ignore */ }
@@ -259,6 +272,7 @@ function loadState() {
     }
     brightnessAll = typeof s.brightnessAll === "number" ? clampBrightness(s.brightnessAll) : null;
     if (brightnessAll !== null) sourceAdjust = {};
+    sourceStats = normalizeStatsMap(s.sourceStats);
     if (s.sourceCrop && typeof s.sourceCrop === "object") {
       sourceCrop = {};
       for (const [path, c] of Object.entries(s.sourceCrop)) setCrop(path, c);
@@ -416,6 +430,172 @@ function setBrightnessAllMode(on) {
   }
 }
 
+// ---- Smart brightness: one level -> a whole look ------------------------
+// The user picks ONE number by eye. From it (and two measurements of the
+// footage) we derive: gain = a multiplicative lift, only as much as the
+// highlights can take without clipping; gamma = midtone/shadow lift for the
+// rest, never clips white; contrast = a touch so the gamma lift does not
+// look hazy; saturation = compensates the desaturation every lift causes,
+// less on footage that is already vivid. backend/render.py:derive_color is a
+// line-for-line port; the derived numbers are sent with every clip so the
+// export burns in exactly what the player showed.
+const NEUTRAL_STATS = { p99: 0.85, sat: 0.35 };
+const HIST_BINS = 32;
+const AUTO_TARGET_MEAN = 0.48; // post-look mean luma Auto brightness aims for (well-exposed mid-tones)
+
+function clamp01(v, d) { v = Number(v); return Number.isFinite(v) ? Math.max(0, Math.min(1, v)) : d; }
+
+function normalizeStats(st) {
+  if (!st || typeof st !== "object") return null;
+  const p99 = clamp01(st.p99, NaN), sat = clamp01(st.sat, NaN);
+  if (!Number.isFinite(p99) || !Number.isFinite(sat)) return null;
+  const r3 = n => Math.round(n * 1000) / 1000;
+  const out = { p99: r3(p99), sat: r3(sat), mean: r3(clamp01(st.mean, 0.5)) };
+  // Coarse luma histogram (HIST_BINS fractions) — lets Auto brightness predict
+  // the post-look mean exactly instead of guessing from the mean alone.
+  if (Array.isArray(st.hist) && st.hist.length === HIST_BINS) {
+    const h = st.hist.map(v => Math.max(0, Number(v) || 0));
+    const tot = h.reduce((a, b) => a + b, 0);
+    if (tot > 0) out.hist = h.map(v => Math.round(v / tot * 10000) / 10000);
+  }
+  return out;
+}
+
+function normalizeStatsMap(m) {
+  const out = {};
+  if (m && typeof m === "object") {
+    for (const [path, st] of Object.entries(m)) { const n = normalizeStats(st); if (path && n) out[path] = n; }
+  }
+  return out;
+}
+
+function deriveColor(level, stats) {
+  const v = clampBrightness(level);
+  if (Math.abs(v) < 0.5) return null;
+  const t = v / 50;
+  const st = stats || {};
+  const p99 = clamp01(st.p99, NEUTRAL_STATS.p99);
+  const sat = clamp01(st.sat, NEUTRAL_STATS.sat);
+  const satScale = Math.max(0.4, Math.min(1, 1.2 - sat));
+  let gain, gamma, contrast, saturation;
+  if (t > 0) {
+    const headroom = Math.max(0, Math.min(0.5, 1 - p99));
+    const gainMax = 1 + Math.min(0.35, headroom * 0.9);
+    gain = 1 + (gainMax - 1) * t;
+    gamma = 1 + t * (0.7 - 0.5 * (gainMax - 1));
+    contrast = 1 + 0.08 * t;
+    saturation = 1 + 0.55 * t * satScale;
+  } else {
+    const u = -t;
+    gain = 1 - 0.30 * u;
+    gamma = 1 - 0.25 * u;
+    contrast = 1 + 0.10 * u;
+    saturation = 1 - 0.12 * u * satScale;
+  }
+  const r4 = n => Math.round(n * 10000) / 10000;
+  return { gain: r4(gain), gamma: r4(gamma), contrast: r4(contrast), saturation: r4(saturation) };
+}
+
+// The look for a source: its brightness level (own or "apply to all") run
+// through deriveColor with that source's own frame stats. null = untouched.
+function getColorParams(path) {
+  return deriveColor(getBrightness(path), path ? sourceStats[path] : null);
+}
+
+// Luma percentile + mean HSV saturation of an RGBA buffer (any size).
+function computeFrameStats(data) {
+  const hist = new Uint32Array(256);
+  let n = 0, lumaSum = 0, satSum = 0, satN = 0;
+  for (let i = 0; i < data.length; i += 4) {
+    const r = data[i], g = data[i + 1], b = data[i + 2];
+    const y = Math.min(255, Math.round(0.2126 * r + 0.7152 * g + 0.0722 * b));
+    hist[y]++; lumaSum += y; n++;
+    const mx = Math.max(r, g, b), mn = Math.min(r, g, b);
+    if (mx >= 26) { satSum += (mx - mn) / mx; satN++; }
+  }
+  if (!n) return null;
+  let acc = 0, p99 = 255;
+  const target = n * 0.99;
+  for (let y = 0; y < 256; y++) { acc += hist[y]; if (acc >= target) { p99 = y; break; } }
+  const coarse = new Array(HIST_BINS).fill(0);
+  for (let y = 0; y < 256; y++) coarse[Math.floor(y * HIST_BINS / 256)] += hist[y];
+  return normalizeStats({ p99: p99 / 255, sat: satN ? satSum / satN : 0, mean: lumaSum / (n * 255), hist: coarse });
+}
+
+// Per-channel tone curve of a look (the gamma-encoded luma goes through the
+// same curve; the saturate matrix is luma-preserving so it is ignored here).
+function lookCurve(p, x) {
+  if (!p) return x;
+  const C = p.gain * p.contrast, B = (p.gain - 1) / 2;
+  return Math.pow(Math.max(0, Math.min(1, C * (x - 0.5) + 0.5 + B)), 1 / p.gamma);
+}
+
+// Auto brightness: the slider level (step 5) whose derived look brings the
+// frame's mean luma closest to AUTO_TARGET_MEAN, predicted from the stored
+// luma histogram (falls back to the mean alone for old stats). Ties go to
+// the smaller change.
+function autoBrightnessLevel(stats) {
+  if (!stats) return 0;
+  const bins = Array.isArray(stats.hist) && stats.hist.length === HIST_BINS
+    ? stats.hist.map((w, i) => [(i + 0.5) / HIST_BINS, w])
+    : [[clamp01(stats.mean, 0.5), 1]];
+  let best = 0, bestErr = Infinity;
+  for (let v = -50; v <= 50; v += 5) {
+    const p = deriveColor(v, stats);
+    const mean = bins.reduce((acc, [x, w]) => acc + w * lookCurve(p, x), 0);
+    const err = Math.abs(mean - AUTO_TARGET_MEAN);
+    if (err < bestErr - 1e-9 || (Math.abs(err - bestErr) <= 1e-9 && Math.abs(v) < Math.abs(best))) { best = v; bestErr = err; }
+  }
+  return best;
+}
+
+// Measure the frame the player is showing for the current source. Returns
+// true when stats were (re)recorded. A frame that is not decoded yet, or
+// is essentially black (fade-in), is skipped so a bad sample never sticks.
+function analyzeCurrentFrame() {
+  const p = els.player;
+  if (!currentVideo || p.readyState < 2 || !p.videoWidth) return false;
+  try {
+    const cw = 160, ch = Math.max(2, Math.round(160 * p.videoHeight / p.videoWidth));
+    const c = document.createElement("canvas");
+    c.width = cw; c.height = ch;
+    const ctx = c.getContext("2d", { willReadFrequently: true });
+    ctx.drawImage(p, 0, 0, cw, ch);
+    const st = computeFrameStats(ctx.getImageData(0, 0, cw, ch).data);
+    if (!st || st.mean < 0.02) return false;
+    sourceStats[currentVideo] = st;
+    return true;
+  } catch (e) { return false; }
+}
+
+// A frame can only be sampled once Chrome has actually painted it, which
+// lags loadeddata / readyState by a frame or two. When an immediate attempt
+// finds nothing, retry as frames get presented (a few times, then give up —
+// the next slider touch tries again).
+let frameAnalysisPending = null;
+function analyzeWhenPainted() {
+  const path = currentVideo;
+  if (!path || sourceStats[path] || frameAnalysisPending === path) return;
+  frameAnalysisPending = path;
+  let tries = 0;
+  const attempt = () => {
+    if (frameAnalysisPending !== path) return;
+    if (currentVideo !== path || sourceStats[path]) { frameAnalysisPending = null; return; }
+    if (analyzeCurrentFrame()) {
+      frameAnalysisPending = null;
+      applyPlayerBrightness();
+      updateBrightnessControl();
+      saveState();
+      return;
+    }
+    if (++tries >= 10) { frameAnalysisPending = null; return; }
+    setTimeout(attempt, 100);
+  };
+  const p = els.player;
+  if (typeof p.requestVideoFrameCallback === "function") p.requestVideoFrameCallback(() => attempt());
+  setTimeout(attempt, 60);
+}
+
 // Slider/reset target: the global value in "all" mode, else the current source.
 function setBrightnessFromControl(v) {
   if (brightnessAll !== null) {
@@ -430,9 +610,24 @@ function setBrightnessFromControl(v) {
 // Live preview of the adjustment on whatever source the player is showing —
 // selectVideo routes every source switch (capture, event preview, preview
 // output segments) through here, so the filter always tracks the source.
+// The look is previewed with an SVG filter (#colorFx in index.html) because
+// CSS filter functions have no gamma step: a per-channel linear pass
+// (contrast+gain), a per-channel gamma pass, then the standard saturate()
+// matrix — the same three steps, in the same order, as the ffmpeg chain.
 function applyPlayerBrightness() {
-  const v = getBrightness(currentVideo);
-  els.player.style.filter = v ? `brightness(${(1 + v / 100).toFixed(3)})` : "";
+  const p = getColorParams(currentVideo);
+  if (!p) { els.player.style.filter = ""; return; }
+  const C = p.gain * p.contrast, B = (p.gain - 1) / 2;
+  const intercept = 0.5 - 0.5 * C + B;
+  for (const fn of els.fxLin.children) { fn.setAttribute("slope", C.toFixed(4)); fn.setAttribute("intercept", intercept.toFixed(4)); }
+  for (const fn of els.fxGam.children) fn.setAttribute("exponent", (1 / p.gamma).toFixed(4));
+  els.fxSat.setAttribute("values", p.saturation.toFixed(4));
+  els.player.style.filter = "url(#colorFx)";
+}
+
+function describeColor(p) {
+  const pct = k => `${k >= 1 ? "+" : ""}${Math.round((k - 1) * 100)}%`;
+  return `gamma ${p.gamma.toFixed(2)} · contrast ${pct(p.contrast)} · colour ${pct(p.saturation)} · gain ${pct(p.gain)}`;
 }
 
 function updateBrightnessControl() {
@@ -447,8 +642,15 @@ function updateBrightnessControl() {
     ? "Brighten or darken every source video (current and added later)"
     : "Brighten or darken the current source video";
   els.brightHint.textContent = all
-    ? "All sources — applies to every event from every source video, including videos you pick later; live in the player and burned into the export."
-    : "Per source video — applies to every event from the video above, live in the player and burned into the export.";
+    ? "All sources — one level for every source video, including videos you pick later; gamma, contrast and colour are set per source from its own footage. Live in the player, burned into the export."
+    : "Per source video — pick the level by eye; gamma, contrast, colour and gain are set automatically from the footage. Live in the player, burned into the export.";
+  const p = getColorParams(currentVideo);
+  const st = currentVideo ? sourceStats[currentVideo] : null;
+  els.brightAuto.textContent = p
+    ? `Auto: ${describeColor(p)} — ${st ? "from the analysed frame" : "default profile (no frame analysed yet)"}`
+    : "Auto: gamma, contrast, colour and gain follow the slider";
+  els.brightAnalyze.disabled = !currentVideo;
+  els.brightAutoBtn.disabled = !currentVideo;
 }
 
 // ---- Per-source crop --------------------------------------------------
@@ -2467,8 +2669,9 @@ function currentProjectPayload(name) {
     intro_seconds: parseFloat(els.introSeconds.value || "4"),
     slow_percent: parseInt(els.slowSlider.value, 10),
     video: currentVideo || (clips[0] && clips[0].video) || "",
-    clips: clips.map(c => ({ start: c.start, end: c.end, slowmo: c.slowmo !== false, video: c.video || "", brightness: getBrightness(c.video), crop: getCrop(c.video) })),
+    clips: clips.map(c => ({ start: c.start, end: c.end, slowmo: c.slowmo !== false, video: c.video || "", brightness: getBrightness(c.video), color: getColorParams(c.video), crop: getCrop(c.video) })),
     brightness_all: brightnessAll,
+    source_stats: { ...sourceStats },
     texts: texts.map(t => ({
       text: t.text, font: t.font, bold: !!t.bold, italic: !!t.italic,
       sizePct: t.sizePct, color: t.color,
@@ -2508,6 +2711,7 @@ function applyProjectPayload(p) {
   // "Apply to all" brightness (old projects without it -> per-source mode).
   brightnessAll = typeof p.brightness_all === "number" ? clampBrightness(p.brightness_all) : null;
   if (brightnessAll !== null) sourceAdjust = {};
+  sourceStats = normalizeStatsMap(p.source_stats);
   // Text overlays (old projects without `texts` -> none).
   texts = (p.texts || []).map(normalizeText);
   selectedTextId = null;
@@ -2613,6 +2817,7 @@ function newProject() {
   clipUndoStack = [];
   sourceAdjust = {};
   brightnessAll = null;
+  sourceStats = {};
   sourceCrop = {};
 
   // Project name + selection.
@@ -2723,6 +2928,7 @@ async function exportSingleClip(clip, includeSlowmo) {
       label: `clip${idx}`,
       out_height: outHeight || 0,
       brightness: getBrightness(clipVideo),
+      color: getColorParams(clipVideo),
       crop: getCrop(clipVideo),
     };
     const res = await fetch("/api/export-clip", {
@@ -2769,7 +2975,7 @@ async function startRender() {
   try {
     const body = {
       video: currentVideo || (clips[0] && clips[0].video) || "",
-      clips: clips.map(c => ({ start: c.start, end: c.end, slowmo: c.slowmo !== false, video: c.video, brightness: getBrightness(c.video), crop: getCrop(c.video) })),
+      clips: clips.map(c => ({ start: c.start, end: c.end, slowmo: c.slowmo !== false, video: c.video, brightness: getBrightness(c.video), color: getColorParams(c.video), crop: getCrop(c.video) })),
       slow_percent: parseInt(els.slowSlider.value, 10),
       intro_seconds: parseFloat(els.introSeconds.value || "0"),
       tournament: els.tournament.value,
@@ -2919,9 +3125,52 @@ els.slowSlider.addEventListener("input", updateSlowLabel);
 els.brightSlider.addEventListener("input", (e) => {
   if (brightnessAll === null && !currentVideo) return;
   setBrightnessFromControl(e.target.value);
+  // First touch on a source: measure the frame the user is looking at so
+  // the derived look fits this footage (re-measure any time with Analyze).
+  if (currentVideo && !sourceStats[currentVideo] && !analyzeCurrentFrame()) analyzeWhenPainted();
   applyPlayerBrightness();
   updateBrightnessControl();
   saveState();
+});
+// ✨ Auto: measure the frame shown (fresh, so it reflects what the user is
+// looking at), pick the level that lands the mid-tones on target, and set it
+// exactly like a slider move (respects "apply to all"). Still just a level —
+// the user can nudge it afterwards.
+els.brightAutoBtn.addEventListener("click", () => {
+  if (!currentVideo) return;
+  if (!analyzeCurrentFrame() && !sourceStats[currentVideo]) {
+    flashTopMessage("Pause the player on a representative (not black) frame first");
+    return;
+  }
+  const st = sourceStats[currentVideo];
+  const level = autoBrightnessLevel(st);
+  setBrightnessFromControl(level);
+  applyPlayerBrightness();
+  updateBrightnessControl();
+  saveState();
+  const shown = level > 0 ? `+${level}%` : `${level}%`;
+  flashTopMessage(level
+    ? `Auto brightness: ${shown} (frame mid-tones ${Math.round(st.mean * 100)}% → target ${Math.round(AUTO_TARGET_MEAN * 100)}%)`
+    : `Auto brightness: 0% — this frame is already well exposed (mid-tones ${Math.round(st.mean * 100)}%)`);
+});
+els.brightAnalyze.addEventListener("click", () => {
+  if (!currentVideo) return;
+  if (analyzeCurrentFrame()) {
+    applyPlayerBrightness();
+    updateBrightnessControl();
+    saveState();
+    const st = sourceStats[currentVideo];
+    flashTopMessage(`Frame analysed — highlights at ${Math.round(st.p99 * 100)}%, colour ${Math.round(st.sat * 100)}%`);
+  } else {
+    flashTopMessage("Pause the player on a representative (not black) frame first");
+  }
+});
+// A source that inherits a level (own or "apply to all") but was never
+// measured gets measured on its first decoded frame, so a video picked later
+// under "apply to all" also gets a look fitted to its own footage.
+els.player.addEventListener("loadeddata", () => {
+  if (!currentVideo || sourceStats[currentVideo] || !getBrightness(currentVideo)) return;
+  analyzeWhenPainted();
 });
 els.brightReset.addEventListener("click", () => {
   if (brightnessAll === null && !currentVideo) return;

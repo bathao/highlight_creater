@@ -885,6 +885,10 @@ input[type="range"] {
 .bright-row .btn { flex-shrink: 0; padding: 4px 9px; }
 .bright-all { display: flex; align-items: center; gap: 6px; margin-top: 4px; font-size: 12px; color: #aab3cc; text-transform: none; letter-spacing: 0; cursor: pointer; }
 .bright-all input { accent-color: #4a7dff; margin: 0; cursor: pointer; }
+.bright-auto { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; margin-top: 4px; }
+.bright-auto .hint { flex: 1 1 auto; color: #aab3cc; }
+.bright-auto .btn { flex-shrink: 0; padding: 3px 8px; font-size: 11px; }
+.bright-auto .btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
 /* Per-source crop (lives in the Setup grid, under Brightness) */
 .crop-row { display: flex; align-items: center; gap: 8px; }

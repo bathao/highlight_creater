@@ -22,6 +22,7 @@ Hardware acceleration:
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import shutil
@@ -94,6 +95,10 @@ class Clip:
     slowmo: bool = True  # if False: only real-speed segment, no slow-mo
     video_path: Optional[Path] = None  # source video for this clip (multi-source)
     brightness: float = 0.0  # percent -50..+50; 0 = unchanged (set per source)
+    # Smart-brightness look derived from `brightness` by the frontend
+    # ({"gain","gamma","contrast","saturation"}); None = derive here from
+    # `brightness` with the neutral footage profile (old clients/projects).
+    color: Optional[dict] = None
     crop: Optional[dict] = None  # {"x","y","w","h"} fractions of the source frame; None = full frame (set per source)
 
     @property
@@ -536,20 +541,131 @@ def _run_ffmpeg(
         raise RuntimeError(f"ffmpeg exited {proc.returncode}\n{tail}")
 
 
-def _brightness_filter(brightness: float) -> str:
-    """Map a UI brightness percent (-50..+50) onto ffmpeg's eq filter as a
-    MULTIPLICATIVE luma gain (out = in * k), matching the CSS
-    `filter: brightness(k)` the frontend previews with. eq pivots its contrast
-    at mid-grey, so adding brightness=(k-1)/2 restores the multiplicative form
-    — black (and the letterbox pad) stays exactly black. '' when ~0."""
+# --------------------------------------------------------------------------
+# Smart brightness ("one slider, the rest is automatic")
+# --------------------------------------------------------------------------
+# The UI exposes ONE number per source: a brightness level in -50..+50. The
+# look burned into the video is a small colour pipeline derived from that
+# level plus two measurements of the footage (99th-percentile luma = how
+# much highlight headroom there is; mean HSV saturation = how vivid the
+# footage already is):
+#
+#   gain        multiplicative lift (cheap, clean) — only as much as the
+#               highlights can take without clipping
+#   gamma       midtone/shadow lift for the rest — never clips white
+#   contrast    a touch of contrast so the gamma lift does not look hazy
+#   saturation  compensates the desaturation every brightness lift causes
+#               (less on footage that is already vivid); calibrated on real
+#               DJI gym footage so mean HSV saturation stays ~85% preserved
+#               at any lift. Darkening deepens colours by itself, so it is
+#               eased back a little instead
+#
+# derive_color() below is a line-for-line port of deriveColor() in
+# frontend/app.js; the frontend sends the derived numbers with every clip
+# so the export uses EXACTLY what the player previewed. It is only called
+# here for payloads that carry a bare `brightness` (old clients/projects).
+#
+# Pipeline (per RGB channel, gamma-encoded values 0..1, clamped between
+# steps) — identical to the SVG filter the player previews with:
+#   y = pow(clip(C*(x - 0.5) + 0.5 + B), 1/gamma)      C = gain*contrast, B = (gain-1)/2
+#   then the standard luma-preserving saturation matrix (SVG/CSS saturate()).
+# Running it in RGB (format=gbrp) instead of `eq` on luma is what keeps
+# colours from going pale: eq scaled Y' and left chroma alone.
+NEUTRAL_STATS = {"p99": 0.85, "sat": 0.35}
+
+
+def _clamp(v: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, v))
+
+
+def derive_color(level: float, stats: Optional[dict] = None) -> Optional[dict]:
+    """Brightness level (-50..+50) + footage stats -> {gain,gamma,contrast,
+    saturation}, or None for level ~0 (identity). Keep in sync with
+    deriveColor() in frontend/app.js."""
     try:
-        v = max(-50.0, min(50.0, float(brightness)))
+        v = _clamp(float(level), -50.0, 50.0)
     except (TypeError, ValueError):
-        return ""
+        return None
     if abs(v) < 0.5:
+        return None
+    t = v / 50.0
+    st = stats if isinstance(stats, dict) else {}
+    try:
+        p99 = _clamp(float(st.get("p99", NEUTRAL_STATS["p99"])), 0.0, 1.0)
+        sat = _clamp(float(st.get("sat", NEUTRAL_STATS["sat"])), 0.0, 1.0)
+    except (TypeError, ValueError):
+        p99, sat = NEUTRAL_STATS["p99"], NEUTRAL_STATS["sat"]
+    sat_scale = _clamp(1.2 - sat, 0.4, 1.0)
+    if t > 0:
+        headroom = _clamp(1.0 - p99, 0.0, 0.5)
+        gain_max = 1.0 + min(0.35, headroom * 0.9)
+        gain = 1.0 + (gain_max - 1.0) * t
+        gamma = 1.0 + t * (0.7 - 0.5 * (gain_max - 1.0))
+        contrast = 1.0 + 0.08 * t
+        saturation = 1.0 + 0.55 * t * sat_scale
+    else:
+        u = -t
+        gain = 1.0 - 0.30 * u
+        gamma = 1.0 - 0.25 * u
+        contrast = 1.0 + 0.10 * u
+        saturation = 1.0 - 0.12 * u * sat_scale
+    # Same rounding as JS Math.round(n * 1e4) / 1e4 (floor(x + 0.5) on the
+    # identical IEEE double) so both sides produce bit-identical numbers;
+    # Python's round() differs on .5 edges (1.03195 -> 1.0319 vs 1.032).
+    r4 = lambda n: math.floor(n * 10000.0 + 0.5) / 10000.0
+    return {
+        "gain": r4(gain),
+        "gamma": r4(gamma),
+        "contrast": r4(contrast),
+        "saturation": r4(saturation),
+    }
+
+
+def _color_filter(brightness: float, color: Optional[dict] = None) -> str:
+    """ffmpeg filter fragment for the smart-brightness look (see above), or
+    '' when it is the identity so untouched chains stay byte-identical.
+    Converts to planar RGB, applies the per-channel curve as a LUT, mixes
+    channels for saturation; the caller's trailing format=yuv420p converts
+    back. All numbers are formatted with fixed decimals and the expressions
+    are single-quoted, so the fragment is safe verbatim in -vf and inside a
+    -filter_complex graph."""
+    p = None
+    if isinstance(color, dict):
+        try:
+            p = {
+                "gain": _clamp(float(color.get("gain", 1.0)), 0.5, 1.6),
+                "gamma": _clamp(float(color.get("gamma", 1.0)), 0.5, 2.0),
+                "contrast": _clamp(float(color.get("contrast", 1.0)), 0.7, 1.4),
+                "saturation": _clamp(float(color.get("saturation", 1.0)), 0.0, 2.0),
+            }
+        except (TypeError, ValueError):
+            p = None
+    if p is None:
+        p = derive_color(brightness)
+    if not p:
         return ""
-    k = 1.0 + v / 100.0
-    return f"eq=contrast={k:.4f}:brightness={(k - 1.0) / 2.0:.4f}"
+    C = p["gain"] * p["contrast"]
+    B = (p["gain"] - 1.0) / 2.0
+    inv_g = 1.0 / p["gamma"]
+    s = p["saturation"]
+    if abs(C - 1.0) < 1e-4 and abs(B) < 1e-4 and abs(inv_g - 1.0) < 1e-4 and abs(s - 1.0) < 1e-4:
+        return ""
+    parts = ["format=gbrp"]
+    if abs(C - 1.0) >= 1e-4 or abs(B) >= 1e-4 or abs(inv_g - 1.0) >= 1e-4:
+        # lutrgb truncates the expression result to int -> +0.5 to round.
+        expr = (f"clip(255*pow(clip({C:.4f}*(val/255-0.5)+0.5{B:+.4f},0,1),{inv_g:.4f})+0.5,0,255)")
+        parts.append(f"lutrgb=r='{expr}':g='{expr}':b='{expr}'")
+    if abs(s - 1.0) >= 1e-4:
+        # Luma-preserving saturation matrix — the same one CSS/SVG saturate() uses.
+        rr, gg, bb = 0.213 + 0.787 * s, 0.715 + 0.285 * s, 0.072 + 0.928 * s
+        r_ = 0.213 - 0.213 * s
+        g_ = 0.715 - 0.715 * s
+        b_ = 0.072 - 0.072 * s
+        parts.append(
+            f"colorchannelmixer=rr={rr:.4f}:rg={g_:.4f}:rb={b_:.4f}"
+            f":gr={r_:.4f}:gg={gg:.4f}:gb={b_:.4f}"
+            f":br={r_:.4f}:bg={g_:.4f}:bb={bb:.4f}")
+    return ",".join(parts)
 
 
 MIN_CROP_FRAC = 0.15  # smallest crop side, as a fraction of the source dimension
@@ -590,7 +706,7 @@ def _crop_pixels(crop: Optional[dict], src_w: int, src_h: int
 
 
 def _video_filter(width: int, height: int, fps: float, setpts: Optional[float] = None,
-                  brightness: float = 0.0,
+                  brightness: float = 0.0, color: Optional[dict] = None,
                   crop_px: Optional[Tuple[int, int, int, int]] = None) -> str:
     parts = []
     if setpts is not None:
@@ -608,10 +724,12 @@ def _video_filter(width: int, height: int, fps: float, setpts: Optional[float] =
     parts.append(f"scale={width}:{height}:force_original_aspect_ratio=decrease:flags=lanczos")
     parts.append(f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black")
     parts.append("setsar=1")
-    eq = _brightness_filter(brightness)
-    if eq:
-        parts.append(eq)
     parts.append(f"fps={fps}")
+    # Colour work runs after fps (no wasted frames) on the canvas-sized
+    # frame, in RGB; the trailing format=yuv420p converts back for NVENC.
+    cf = _color_filter(brightness, color)
+    if cf:
+        parts.append(cf)
     parts.append("format=yuv420p")
     return ",".join(parts)
 
@@ -707,7 +825,8 @@ def render_real(
         "-to", f"{clip.end:.3f}",
         "-i", str(src),
     ]
-    vf = _video_filter(width, height, fps, brightness=clip.brightness, crop_px=crop_px)
+    vf = _video_filter(width, height, fps, brightness=clip.brightness, color=clip.color,
+                       crop_px=crop_px)
     if source_has_audio:
         # Map the source's own audio.
         args += [
@@ -755,7 +874,7 @@ def render_slowmo(
 
     badge = _slowmo_badge_filter(height)
     vf = _video_filter(width, height, fps, setpts=factor, brightness=clip.brightness,
-                       crop_px=crop_px)
+                       color=clip.color, crop_px=crop_px)
     if badge:
         vf = f"{vf},{badge}"
 
