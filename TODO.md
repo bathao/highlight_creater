@@ -1,6 +1,6 @@
 # TODO — Highlight Creator
 
-> Open work items, ordered by priority. Last synced against the code: 2026-09-25 (v1.10 — smart brightness, uncommitted on top of `310e486`; v1.9 `e35d43b`; the v1.8.1 build has been in production use 2026-09-11 → 2026-09-23 (19 renders in `workspace/output/`); manual crop checklist still pending).
+> Open work items, ordered by priority. Last synced against the code: 2026-09-25 (v1.10 — smart brightness + Auto, `f04ec61`; v1.9 `e35d43b`; the v1.8.1 build has been in production use 2026-09-11 → 2026-09-23 (19 renders in `workspace/output/`); manual crop checklist still pending).
 > See [progress.md](progress.md) for everything already done.
 
 ---
@@ -109,7 +109,7 @@
 
 Summary: full render pipeline (intro + real + slow-mo + concat), NVENC, byte-range streaming, SSE progress, project CRUD, custom timeline + control bar, keyboard shortcuts, auto-persisted state, single-clip export, 1-click `start.bat` launcher.
 
-- **v1.10 (2026-09-25):** smart brightness — one level, auto-derived gain/gamma/contrast/saturation from per-source frame analysis, plus ✨ Auto (picks the level from the frame's luma histogram); preview (SVG filter) and export (RGB `lutrgb`+`colorchannelmixer`) now run identical maths, fixing the pale colours the luma-only `eq` export produced. Verified synthetic + real 10-bit BT.709 frames, 20/20 headless checks, live export. Uncommitted.
+- **v1.10 (2026-09-25):** smart brightness — one level, auto-derived gain/gamma/contrast/saturation from per-source frame analysis, plus ✨ Auto (picks the level from the frame's luma histogram); preview (SVG filter) and export (RGB `lutrgb`+`colorchannelmixer`) now run identical maths, fixing the pale colours the luma-only `eq` export produced. Verified synthetic + real 10-bit BT.709 frames, 20/20 + 11/11 headless checks, live export. Committed `f04ec61`.
 - **v1.9 (2026-09-24):** "Apply to all sources" brightness checkbox — one value inherited by every current and later-added source; persisted (`brightnessAll` / project `brightness_all`); 20/20 headless UI checks. Committed `e35d43b`.
 - **v1.8.1 (2026-08-25):** text overlays — deterministic wrap shared by preview + export, one drawtext per line (ffmpeg 8 newline-glyph bug), CRLF/LF fix, block-aware position pad
 - **v1.8 (2026-08-25):** per-source crop / zoom-to-region (aspect-locked by default, free-aspect toggle, live WYSIWYG preview, burned into all exports); fix: native file picker crashed on filenames with Vietnamese diacritics (UTF-8 subprocess)
