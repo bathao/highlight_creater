@@ -23,6 +23,10 @@ const els = {
   brightAuto: $("brightAuto"),
   brightAnalyze: $("brightAnalyze"),
   brightAutoBtn: $("brightAutoBtn"),
+  brightAutoAll: $("brightAutoAll"),
+  brightAutoAllText: $("brightAutoAllText"),
+  volSlider: $("volSlider"),
+  volBtn: $("volBtn"),
   fxLin: $("fxLin"),
   fxGam: $("fxGam"),
   fxSat: $("fxSat"),
@@ -156,6 +160,15 @@ let brightnessAll = null;
 // the brightness level + these into the gamma/contrast/saturation/gain the
 // player previews and the export burns in. Missing = neutral profile.
 let sourceStats = {};
+// "Auto for all sources": when on, every source that has no level of its
+// own gets measured (offscreen, at the middle of its first event) and its
+// level picked by autoBrightnessLevel — including sources added later.
+// sourceMode[path] = "auto" (level chosen by Auto) | "manual" (user moved
+// the slider / reset); a manual source is never overwritten by the mode.
+let brightnessAuto = false;
+let sourceMode = {};
+// Player (preview) volume 0..1 — persisted; the export mix is unaffected.
+let playerVolume = 1;
 // Per-source crop: video path -> {x,y,w,h} fractions of the source frame
 // (top-left + size); absent = full frame. Previewed live via a CSS
 // transform + clip-path on the player; the render maps the same fractions
@@ -234,8 +247,11 @@ function saveState() {
       music,
       sourceAdjust,
       brightnessAll,
+      brightnessAuto,
+      sourceMode,
       sourceStats,
       sourceCrop,
+      playerVolume,
     }));
   } catch (e) { /* ignore */ }
 }
@@ -273,6 +289,9 @@ function loadState() {
     brightnessAll = typeof s.brightnessAll === "number" ? clampBrightness(s.brightnessAll) : null;
     if (brightnessAll !== null) sourceAdjust = {};
     sourceStats = normalizeStatsMap(s.sourceStats);
+    brightnessAuto = s.brightnessAuto === true;
+    sourceMode = normalizeModeMap(s.sourceMode);
+    if (typeof s.playerVolume === "number") playerVolume = Math.max(0, Math.min(1, s.playerVolume));
     if (s.sourceCrop && typeof s.sourceCrop === "object") {
       sourceCrop = {};
       for (const [path, c] of Object.entries(s.sourceCrop)) setCrop(path, c);
@@ -419,6 +438,7 @@ function knownSourcePaths() {
 function setBrightnessAllMode(on) {
   if (on) {
     if (brightnessAll !== null) return;
+    brightnessAuto = false;
     brightnessAll = getBrightness(currentVideo);
     sourceAdjust = {};
   } else {
@@ -456,7 +476,11 @@ function normalizeStats(st) {
   if (Array.isArray(st.hist) && st.hist.length === HIST_BINS) {
     const h = st.hist.map(v => Math.max(0, Number(v) || 0));
     const tot = h.reduce((a, b) => a + b, 0);
-    if (tot > 0) out.hist = h.map(v => Math.round(v / tot * 10000) / 10000);
+    // Raw counts get normalised to fractions; an already-normalised histogram
+    // (sum ~1 up to rounding) is kept as is, so re-normalising on every load
+    // never drifts the stored values.
+    if (tot > 0) out.hist = Math.abs(tot - 1) < 0.01 ? h.map(v => Math.round(v * 10000) / 10000)
+                                                     : h.map(v => Math.round(v / tot * 10000) / 10000);
   }
   return out;
 }
@@ -596,6 +620,121 @@ function analyzeWhenPainted() {
   setTimeout(attempt, 60);
 }
 
+function normalizeModeMap(m) {
+  const out = {};
+  if (m && typeof m === "object") {
+    for (const [path, mode] of Object.entries(m)) if (path && (mode === "auto" || mode === "manual")) out[path] = mode;
+  }
+  return out;
+}
+
+// Measure a source without disturbing the player: a hidden <video> seeks to
+// `t` and its painted frame is sampled. Resolves to stats or null (decode
+// error, timeout, or only black frames).
+function analyzeSourceOffscreen(path, t) {
+  return new Promise(resolve => {
+    const v = document.createElement("video");
+    v.muted = true; v.preload = "auto"; v.playsInline = true;
+    v.style.cssText = "position:fixed;left:-9999px;top:0;width:160px;height:90px;opacity:0;pointer-events:none";
+    let done = false, tries = 0;
+    const finish = st => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      v.removeAttribute("src"); v.load(); v.remove();
+      resolve(st);
+    };
+    const timer = setTimeout(() => finish(null), 20000);
+    const grab = () => {
+      if (done) return;
+      let st = null;
+      try {
+        if (v.readyState >= 2 && v.videoWidth) {
+          const cw = 160, ch = Math.max(2, Math.round(160 * v.videoHeight / v.videoWidth));
+          const c = document.createElement("canvas"); c.width = cw; c.height = ch;
+          const ctx = c.getContext("2d", { willReadFrequently: true });
+          ctx.drawImage(v, 0, 0, cw, ch);
+          st = computeFrameStats(ctx.getImageData(0, 0, cw, ch).data);
+        }
+      } catch (e) { st = null; }
+      if (st && st.mean >= 0.02) return finish(st);
+      if (++tries >= 15) return finish(null);
+      setTimeout(grab, 120);
+    };
+    v.addEventListener("loadedmetadata", () => {
+      const dur = Number.isFinite(v.duration) ? v.duration : 0;
+      const target = Math.max(0, Math.min(t || 0, dur > 1 ? dur - 0.5 : 0));
+      if (Math.abs(v.currentTime - target) < 0.05) grab(); else v.currentTime = target;
+    });
+    v.addEventListener("seeked", () => {
+      if (typeof v.requestVideoFrameCallback === "function") v.requestVideoFrameCallback(() => grab());
+      setTimeout(grab, 150);
+    });
+    v.addEventListener("error", () => finish(null));
+    document.body.appendChild(v);
+    v.src = `/api/source-stream?path=${encodeURIComponent(path)}`;
+  });
+}
+
+// Representative time for measuring a source: the middle of its first event
+// (gameplay, not a fade-in), else the player position if it is showing, else 3 s.
+function representativeTime(path) {
+  const c = clips.find(k => k.video === path && k.end > k.start);
+  if (c) return (c.start + c.end) / 2;
+  if (path === currentVideo && els.player.currentTime > 0) return els.player.currentTime;
+  return 3;
+}
+
+const autoPending = new Set();
+// Under "auto for all": give `path` its own level if it has none yet
+// (neither auto nor manual). Resolves when done; safe to call repeatedly.
+async function ensureAutoLevel(path) {
+  if (!brightnessAuto || !path || sourceMode[path] || autoPending.has(path)) return false;
+  autoPending.add(path);
+  try {
+    let st = sourceStats[path] || null;
+    if (!st) st = await analyzeSourceOffscreen(path, representativeTime(path));
+    if (!brightnessAuto || sourceMode[path]) return false; // mode changed / user intervened meanwhile
+    if (!st) return false;
+    sourceStats[path] = st;
+    setBrightness(path, autoBrightnessLevel(st));
+    sourceMode[path] = "auto";
+    if (path === currentVideo) { applyPlayerBrightness(); updateBrightnessControl(); }
+    saveState();
+    return true;
+  } finally {
+    autoPending.delete(path);
+  }
+}
+
+// Every known source (events + the one in the player) that still lacks a
+// level, one after another (one hidden decoder at a time). Render / export
+// await this so no source goes out untouched.
+async function ensureAllAutoLevels() {
+  if (!brightnessAuto) return;
+  const todo = knownSourcePaths().filter(p => !sourceMode[p]);
+  if (!todo.length) return;
+  flashTopMessage(`Auto brightness — analysing ${todo.length} source${todo.length > 1 ? "s" : ""}…`);
+  let ok = 0;
+  for (const p of todo) if (await ensureAutoLevel(p)) ok++;
+  const failed = todo.length - ok;
+  flashTopMessage(failed
+    ? `Auto brightness — ${ok} source${ok !== 1 ? "s" : ""} set, ${failed} could not be analysed (left unchanged)`
+    : `Auto brightness — ${ok} source${ok !== 1 ? "s" : ""} set`);
+  updateBrightnessControl();
+}
+
+// Switch the mode. On: turns "apply to all" off (the two are exclusive —
+// one global level vs one level per source) and analyses every known
+// source. Off: every source keeps the level it has.
+function setBrightnessAutoMode(on) {
+  on = !!on;
+  if (on === brightnessAuto) return;
+  if (on && brightnessAll !== null) setBrightnessAllMode(false);
+  brightnessAuto = on;
+  if (on) ensureAllAutoLevels();
+}
+
 // Slider/reset target: the global value in "all" mode, else the current source.
 function setBrightnessFromControl(v) {
   if (brightnessAll !== null) {
@@ -604,6 +743,7 @@ function setBrightnessFromControl(v) {
   } else {
     if (!currentVideo) return;
     setBrightness(currentVideo, v);
+    sourceMode[currentVideo] = "manual";
   }
 }
 
@@ -646,9 +786,19 @@ function updateBrightnessControl() {
     : "Per source video — pick the level by eye; gamma, contrast, colour and gain are set automatically from the footage. Live in the player, burned into the export.";
   const p = getColorParams(currentVideo);
   const st = currentVideo ? sourceStats[currentVideo] : null;
+  els.brightAutoAll.checked = brightnessAuto;
+  let modeNote = "";
+  if (brightnessAuto && currentVideo) {
+    const m = sourceMode[currentVideo];
+    modeNote = m === "auto" ? "this source: auto level · " : m === "manual" ? "this source: manual level · "
+      : autoPending.has(currentVideo) ? "this source: analysing… · " : "this source: not analysed yet · ";
+  }
   els.brightAuto.textContent = p
-    ? `Auto: ${describeColor(p)} — ${st ? "from the analysed frame" : "default profile (no frame analysed yet)"}`
-    : "Auto: gamma, contrast, colour and gain follow the slider";
+    ? `${modeNote}Auto: ${describeColor(p)} — ${st ? "from the analysed frame" : "default profile (no frame analysed yet)"}`
+    : `${modeNote}Auto: gamma, contrast, colour and gain follow the slider`;
+  if (brightnessAuto) {
+    els.brightHint.textContent = "Auto for all sources — every source video (including ones you pick later) is measured and gets its own level; move the slider on a source to take it over by hand. Live in the player, burned into the export.";
+  }
   els.brightAnalyze.disabled = !currentVideo;
   els.brightAutoBtn.disabled = !currentVideo;
 }
@@ -819,6 +969,7 @@ async function selectVideo(path) {
   }
   refreshResolutionOptions();
   saveState();
+  if (brightnessAuto) ensureAutoLevel(path);
 }
 
 // Directory portion of an absolute path (everything before the last separator).
@@ -1570,7 +1721,7 @@ function pvExit() {
   // Stop any music audition and restore the player's own audio level.
   musicAuditioning = false;
   if (els.musicAudio) els.musicAudio.pause();
-  els.player.volume = 1;
+  els.player.volume = effectivePlayerVolume();
   updateAuditionBtn();
   els.previewOutputBtn.classList.remove("active");
   els.previewOutputBtn.textContent = "▶ Preview output";
@@ -1852,7 +2003,7 @@ function clearMusic() {
 function syncMusicPlayback() {
   const a = els.musicAudio;
   if (!a) return;
-  els.player.volume = pvMode ? Math.min(1, music.originalVolume) : 1;
+  els.player.volume = effectivePlayerVolume();
   if (musicAuditioning) { a.volume = Math.min(1, music.volume); return; }
   const tr = selectedTrack();
   if (!pvMode || !tr) { if (!a.paused) a.pause(); return; }
@@ -2671,6 +2822,8 @@ function currentProjectPayload(name) {
     video: currentVideo || (clips[0] && clips[0].video) || "",
     clips: clips.map(c => ({ start: c.start, end: c.end, slowmo: c.slowmo !== false, video: c.video || "", brightness: getBrightness(c.video), color: getColorParams(c.video), crop: getCrop(c.video) })),
     brightness_all: brightnessAll,
+    brightness_auto: brightnessAuto,
+    source_modes: { ...sourceMode },
     source_stats: { ...sourceStats },
     texts: texts.map(t => ({
       text: t.text, font: t.font, bold: !!t.bold, italic: !!t.italic,
@@ -2712,6 +2865,9 @@ function applyProjectPayload(p) {
   brightnessAll = typeof p.brightness_all === "number" ? clampBrightness(p.brightness_all) : null;
   if (brightnessAll !== null) sourceAdjust = {};
   sourceStats = normalizeStatsMap(p.source_stats);
+  brightnessAuto = p.brightness_auto === true && brightnessAll === null;
+  sourceMode = normalizeModeMap(p.source_modes);
+  if (brightnessAuto) ensureAllAutoLevels();
   // Text overlays (old projects without `texts` -> none).
   texts = (p.texts || []).map(normalizeText);
   selectedTextId = null;
@@ -2817,6 +2973,8 @@ function newProject() {
   clipUndoStack = [];
   sourceAdjust = {};
   brightnessAll = null;
+  brightnessAuto = false;
+  sourceMode = {};
   sourceStats = {};
   sourceCrop = {};
 
@@ -2904,6 +3062,10 @@ async function exportSingleClip(clip, includeSlowmo) {
     alert("Invalid clip");
     return;
   }
+  // Under "auto for all", sources never shown in the player may still be
+  // waiting for their level — finish that before taking the busy flag
+  // (guardRenderBusy both checks and sets it, so it must run once).
+  await ensureAllAutoLevels();
   if (guardRenderBusy()) return;
   els.renderBtn.disabled = true;
   els.cancelBtn.disabled = false;
@@ -2961,6 +3123,10 @@ async function startRender() {
       return;
     }
   }
+  // Under "auto for all", sources never shown in the player may still be
+  // waiting for their level — finish that before taking the busy flag
+  // (guardRenderBusy both checks and sets it, so it must run once).
+  await ensureAllAutoLevels();
   if (guardRenderBusy()) return;
   els.renderBtn.disabled = true;
   els.cancelBtn.disabled = false;
@@ -3145,6 +3311,7 @@ els.brightAutoBtn.addEventListener("click", () => {
   const st = sourceStats[currentVideo];
   const level = autoBrightnessLevel(st);
   setBrightnessFromControl(level);
+  if (brightnessAll === null) sourceMode[currentVideo] = "auto";
   applyPlayerBrightness();
   updateBrightnessControl();
   saveState();
@@ -3183,6 +3350,42 @@ els.brightAll.addEventListener("change", (e) => {
   setBrightnessAllMode(e.target.checked);
   applyPlayerBrightness();
   updateBrightnessControl();
+  saveState();
+});
+els.brightAutoAll.addEventListener("change", (e) => {
+  setBrightnessAutoMode(e.target.checked);
+  applyPlayerBrightness();
+  updateBrightnessControl();
+  saveState();
+});
+els.brightAutoAllText.addEventListener("click", (e) => {
+  e.preventDefault();
+  els.brightAutoAll.checked = !els.brightAutoAll.checked;
+  els.brightAutoAll.dispatchEvent(new Event("change"));
+});
+
+// ---- Player volume (preview only) --------------------------------------
+function effectivePlayerVolume() {
+  return Math.max(0, Math.min(1, playerVolume * (pvMode ? Math.min(1, music.originalVolume) : 1)));
+}
+function updateVolumeControl() {
+  els.volSlider.value = Math.round(playerVolume * 100);
+  els.volBtn.textContent = playerVolume === 0 ? "🔇" : playerVolume < 0.5 ? "🔉" : "🔊";
+  els.volBtn.title = playerVolume === 0 ? "Unmute" : "Mute";
+  els.volSlider.title = `Preview volume ${Math.round(playerVolume * 100)}% (export audio is not affected)`;
+  els.player.volume = effectivePlayerVolume();
+}
+let volumeBeforeMute = 1;
+els.volSlider.addEventListener("input", (e) => {
+  playerVolume = Math.max(0, Math.min(1, (parseInt(e.target.value, 10) || 0) / 100));
+  if (playerVolume > 0) volumeBeforeMute = playerVolume;
+  updateVolumeControl();
+  saveState();
+});
+els.volBtn.addEventListener("click", () => {
+  if (playerVolume > 0) { volumeBeforeMute = playerVolume; playerVolume = 0; }
+  else playerVolume = volumeBeforeMute || 1;
+  updateVolumeControl();
   saveState();
 });
 // The checkbox sits inside the Brightness <label>, whose implicit control is
@@ -3450,8 +3653,12 @@ document.addEventListener("keydown", (e) => {
   updatePlayBtn();
   updatePickLabel();
   updateUndoBtn();
+  updateVolumeControl();
+  updateBrightnessControl();
   // Restore the last-used source video into the player, if any.
   if (currentVideo) selectVideo(currentVideo);
+  // Sources known from a restored session that still lack an auto level.
+  if (brightnessAuto) ensureAllAutoLevels();
   await loadProjectList();
   loadMusicLibrary();   // fetch the library, then refresh the summary
   refreshResolutionOptions();

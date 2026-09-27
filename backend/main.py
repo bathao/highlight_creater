@@ -534,6 +534,9 @@ class ProjectPayload(BaseModel):
     # ({path: {p99, sat, mean}}), so a reloaded project previews and renders
     # the same look. Round-trip only.
     source_stats: Optional[dict] = None
+    # "Auto for all sources" mode + per-source "auto"/"manual" markers (round-trip only).
+    brightness_auto: Optional[bool] = None
+    source_modes: Optional[dict] = None
 
 
 def _safe_project_path(name: str) -> Path:

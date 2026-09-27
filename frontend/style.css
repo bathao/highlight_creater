@@ -296,6 +296,9 @@ input[type="range"] {
 .timeline:hover .timeline-tooltip { opacity: 1; }
 
 /* ----- Control bar ----- */
+.ctrl-volume { display: inline-flex; align-items: center; gap: 4px; }
+.ctrl-volume .vol-btn { padding: 4px 6px; min-width: 0; }
+.ctrl-volume input[type="range"] { width: 80px; accent-color: #4a7dff; cursor: pointer; }
 .player-controls {
   display: flex;
   justify-content: space-between;
@@ -883,7 +886,8 @@ input[type="range"] {
 .bright-row input[type="range"] { flex: 1; min-width: 0; }
 .bright-row input[type="range"]:disabled { opacity: 0.5; cursor: not-allowed; }
 .bright-row .btn { flex-shrink: 0; padding: 4px 9px; }
-.bright-all { display: flex; align-items: center; gap: 6px; margin-top: 4px; font-size: 12px; color: #aab3cc; text-transform: none; letter-spacing: 0; cursor: pointer; }
+.bright-modes { display: flex; flex-wrap: wrap; gap: 4px 16px; margin-top: 4px; }
+.bright-all { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #aab3cc; text-transform: none; letter-spacing: 0; cursor: pointer; }
 .bright-all input { accent-color: #4a7dff; margin: 0; cursor: pointer; }
 .bright-auto { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; margin-top: 4px; }
 .bright-auto .hint { flex: 1 1 auto; color: #aab3cc; }

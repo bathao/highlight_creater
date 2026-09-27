@@ -1,6 +1,6 @@
 # TODO — Highlight Creator
 
-> Open work items, ordered by priority. Last synced against the code: 2026-09-25 (v1.10 — smart brightness + Auto, `f04ec61`; v1.9 `e35d43b`; the v1.8.1 build has been in production use 2026-09-11 → 2026-09-23 (19 renders in `workspace/output/`); manual crop checklist still pending).
+> Open work items, ordered by priority. Last synced against the code: 2026-09-27 (v1.11 — auto-for-all brightness + preview volume, uncommitted on top of `4e450ef`; v1.10 `f04ec61` in production use from 2026-09-26 (two 720p renders); v1.9 `e35d43b`; the v1.8.1 build has been in production use 2026-09-11 → 2026-09-23 (19 renders in `workspace/output/`); manual crop checklist still pending).
 > See [progress.md](progress.md) for everything already done.
 
 ---
@@ -30,7 +30,7 @@
   - Job state currently lives only in RAM (`_JOBS` dict) — closing the tab loses it
   - List the 10 most recent jobs in the UI, click to open the output
   - 💡 Quickest first step: the backend already has `GET /api/outputs` ([backend/main.py:487](backend/main.py#L487)) listing rendered files — the frontend **still doesn't call it**. Wire that into the UI before building full job history
-  - 📈 Now urgent in practice: as of 2026-09-24 there are 19 rendered files (~3.6 GB, 8 full renders + 11 per-event exports) in `workspace/output/` with no way to list, open or delete them from the UI
+  - 📈 Still relevant: 19 rendered files (~3.6 GB) had piled up by 2026-09-24 and were deleted by hand in Explorer on/before 2026-09-27 — the UI still cannot list, open or delete outputs (2 renders, 1.3 GB, on disk now)
 
 - [ ] **Audio normalize** with the `loudnorm` filter
   - `sounds/slow_motion.mp3` can be much louder/quieter than the source audio — normalize both to the same LUFS
@@ -109,6 +109,7 @@
 
 Summary: full render pipeline (intro + real + slow-mo + concat), NVENC, byte-range streaming, SSE progress, project CRUD, custom timeline + control bar, keyboard shortcuts, auto-persisted state, single-clip export, 1-click `start.bat` launcher.
 
+- **v1.11 (2026-09-27):** "Auto for all sources" brightness mode (offscreen per-source analysis + auto level, manual takeover, exclusive with apply-to-all, render/export wait for pending levels) + 🔊 preview volume/mute in the player bar; fixed the double busy-guard and idempotent histogram normalisation. 21/21 new + 40/40 regression headless checks. Uncommitted. Wider slider range (±100) was proposed and **declined by the user** — stays ±50.
 - **v1.10 (2026-09-25):** smart brightness — one level, auto-derived gain/gamma/contrast/saturation from per-source frame analysis, plus ✨ Auto (picks the level from the frame's luma histogram); preview (SVG filter) and export (RGB `lutrgb`+`colorchannelmixer`) now run identical maths, fixing the pale colours the luma-only `eq` export produced. Verified synthetic + real 10-bit BT.709 frames, 20/20 + 11/11 headless checks, live export. Committed `f04ec61`.
 - **v1.9 (2026-09-24):** "Apply to all sources" brightness checkbox — one value inherited by every current and later-added source; persisted (`brightnessAll` / project `brightness_all`); 20/20 headless UI checks. Committed `e35d43b`.
 - **v1.8.1 (2026-08-25):** text overlays — deterministic wrap shared by preview + export, one drawtext per line (ffmpeg 8 newline-glyph bug), CRLF/LF fix, block-aware position pad

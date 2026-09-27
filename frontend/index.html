@@ -93,10 +93,16 @@
           <button id="brightAutoBtn" type="button" class="btn small" disabled
                   title="Measure the frame shown and pick the brightness level that puts its mid-tones at a well-exposed level — you can still nudge the slider afterwards">✨ Auto</button>
         </div>
-        <span class="bright-all" title="Use one brightness for every source video — the ones already added and any you pick from now on">
-          <input id="brightAll" type="checkbox" />
-          <span id="brightAllText">Apply to all sources</span>
-        </span>
+        <div class="bright-modes">
+          <span class="bright-all" title="Use one brightness for every source video — the ones already added and any you pick from now on">
+            <input id="brightAll" type="checkbox" />
+            <span id="brightAllText">Apply to all sources</span>
+          </span>
+          <span class="bright-all" title="Every source video — including ones you pick later — is measured and gets its own automatic level; sources you adjust by hand keep your level">
+            <input id="brightAutoAll" type="checkbox" />
+            <span id="brightAutoAllText">Auto for all sources</span>
+          </span>
+        </div>
         <div class="bright-auto">
           <small id="brightAuto" class="hint">Auto: gamma, contrast, colour and gain follow the slider</small>
           <button id="brightAnalyze" type="button" class="btn small ghost" disabled
@@ -182,6 +188,10 @@
 
       <div class="ctrl-right">
         <span class="ctrl-time" id="playerTime">00:00.00 / 00:00.00</span>
+        <span class="ctrl-volume" title="Preview volume (export audio is not affected)">
+          <button class="ctrl-btn vol-btn" id="volBtn" type="button" title="Mute">🔊</button>
+          <input id="volSlider" type="range" min="0" max="100" step="5" value="100" />
+        </span>
         <label class="ctrl-speed">
           <span class="muted">speed</span>
           <select id="speedSelect" title="Preview playback speed">
