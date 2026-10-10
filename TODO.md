@@ -1,6 +1,6 @@
 # TODO — Highlight Creator
 
-> Open work items, ordered by priority. Last synced against the code: 2026-10-10 (v1.12 — fullscreen for the video box, `bfcbfe9`; before that no code changes since v1.11 `2783163` / docs `9cfee99`, 2026-09-27; v1.11 in production use 2026-09-27 → 2026-10-09 (5 full renders + 2 per-event exports, 1080p tier, crop visibly in use); v1.10 `f04ec61` used 2026-09-26 (two 720p renders); v1.9 `e35d43b`; v1.8.1 used 2026-09-11 → 2026-09-23; manual crop checklist still pending; no git remote).
+> Open work items, ordered by priority. Last synced against the code: 2026-10-10 (v1.12 — fullscreen for the video box, `bfcbfe9`; before that no code changes since v1.11 `2783163` / docs `9cfee99`, 2026-09-27; v1.11 in production use 2026-09-27 → 2026-10-09 (5 full renders + 2 per-event exports, 1080p tier, crop visibly in use); v1.10 `f04ec61` used 2026-09-26 (two 720p renders); v1.9 `e35d43b`; v1.8.1 used 2026-09-11 → 2026-09-23; manual crop checklist still pending; pushed to GitHub `origin` = https://github.com/bathao/highlight_creater on 2026-10-10).
 > See [progress.md](progress.md) for everything already done.
 
 ---
@@ -90,7 +90,7 @@
   - `main._safe_project_path` / `_safe_source_path` / `_safe_music_path` (path-traversal attempts)
 
 - [ ] **GitHub Actions CI**: lint (ruff) + pytest on push
-  - The git repo now exists (`master`, clean) — but **no remote is configured yet**; set one up + push first
+  - ~~No remote configured~~ — `origin` = https://github.com/bathao/highlight_creater, `master` pushed 2026-10-10; CI can be added now
 
 - [ ] **Dockerfile** (optional) for users who don't want a local Python install
   - Needs GPU passthrough — NVIDIA Container Toolkit
