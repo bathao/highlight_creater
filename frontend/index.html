@@ -134,7 +134,7 @@
   <section class="card player-card">
     <h2>2 · Player &amp; Mark</h2>
 
-    <div class="player-wrap">
+    <div class="player-wrap" id="playerWrap">
       <video id="player" preload="metadata" playsinline></video>
       <!-- Live, draggable text-overlay layer (WYSIWYG positioning). Each label
            maps to a fraction of this 16:9 box = the final canvas. -->
@@ -173,7 +173,7 @@
     </div>
 
     <!-- Custom control bar -->
-    <div class="player-controls">
+    <div class="player-controls" id="playerControls">
       <div class="ctrl-left">
         <button class="ctrl-btn" data-skip="-10" title="Back 10s (Shift+←)">-10s</button>
         <button class="ctrl-btn" data-skip="-5" title="Back 5s (←)">-5s</button>
@@ -212,6 +212,7 @@
           <span class="hl-dot"></span>
           <span id="highlightText">Highlight start/end</span>
         </button>
+        <button class="ctrl-btn fs-btn" id="fsBtn" type="button" title="Fullscreen (F)">⛶</button>
       </div>
     </div>
 

@@ -27,6 +27,9 @@ const els = {
   brightAutoAllText: $("brightAutoAllText"),
   volSlider: $("volSlider"),
   volBtn: $("volBtn"),
+  fsBtn: $("fsBtn"),
+  playerWrap: $("playerWrap"),
+  playerControls: $("playerControls"),
   fxLin: $("fxLin"),
   fxGam: $("fxGam"),
   fxSat: $("fxSat"),
@@ -3282,7 +3285,8 @@ els.browsePath.addEventListener("keydown", (e) => {
 });
 document.addEventListener("keydown", (e) => {
   if (e.key !== "Escape") return;
-  if (cropEditing) exitCropMode(false);
+  if (fsFallback) toggleFullscreen();   // mirrors the browser: Esc leaves fullscreen first
+  else if (cropEditing) exitCropMode(false);
   else if (!els.browseModal.classList.contains("hidden")) closeBrowse();
   else if (pvMode) pvExit();
 });
@@ -3388,6 +3392,96 @@ els.volBtn.addEventListener("click", () => {
   updateVolumeControl();
   saveState();
 });
+// ---- Fullscreen (the video box only, like a normal video player) -----
+// The WRAPPER goes fullscreen, not the bare <video>: the text-overlay layer,
+// the crop preview/editor and the brightness filter all live in (and are
+// sized by) the wrapper, so WYSIWYG holds. For the duration, the timeline,
+// control bar and preview bar are moved INTO the wrapper as an auto-hiding
+// bottom chrome (their listeners travel with the nodes) and moved back on
+// exit. Keyboard shortcuts are document-level, so they keep working; Esc is
+// consumed by the browser (exits fullscreen only). If the Fullscreen API is
+// unavailable or refused, a fixed-position "theatre mode" is used instead.
+const fsHome = new Map();   // moved node -> comment marking its original slot
+let fsChrome = null;
+let fsIdleTimer = null;
+let fsFallback = false;
+const FS_IDLE_MS = 2500;
+
+function isFullscreen() {
+  return document.fullscreenElement === els.playerWrap || fsFallback;
+}
+function fsMoveIn() {
+  if (fsChrome) return;
+  fsChrome = document.createElement("div");
+  fsChrome.className = "fs-chrome";
+  for (const node of [els.previewBar, els.timeline, els.playerControls]) {
+    const ph = document.createComment("fs-home");
+    node.parentNode.insertBefore(ph, node);
+    fsHome.set(node, ph);
+    fsChrome.appendChild(node);
+  }
+  els.playerWrap.appendChild(fsChrome);
+}
+function fsMoveOut() {
+  if (!fsChrome) return;
+  for (const [node, ph] of fsHome) ph.parentNode.replaceChild(node, ph);
+  fsHome.clear();
+  fsChrome.remove();
+  fsChrome = null;
+}
+// Sizes are only right after the fullscreen layout pass -> next frame.
+function fsRelayout() {
+  requestAnimationFrame(() => {
+    applyPlayerCrop();
+    layoutOverlayLayer();
+    if (cropEditing) positionCropRegion();
+    if (texts.length) renderTextOverlays();
+  });
+}
+// Show the chrome and re-arm the idle timer (never hides while paused or
+// while the pointer rests on the chrome itself).
+function fsPoke() {
+  els.playerWrap.classList.remove("idle");
+  clearTimeout(fsIdleTimer);
+  if (!isFullscreen() || els.player.paused) return;
+  fsIdleTimer = setTimeout(() => {
+    if (isFullscreen() && !els.player.paused && !(fsChrome && fsChrome.matches(":hover"))) {
+      els.playerWrap.classList.add("idle");
+    }
+  }, FS_IDLE_MS);
+}
+function syncFullscreen() {
+  const on = isFullscreen();
+  els.playerWrap.classList.toggle("is-fs", on);
+  els.playerWrap.classList.toggle("fs-fallback", on && fsFallback);
+  if (on) fsMoveIn();
+  else { fsMoveOut(); els.playerWrap.classList.remove("idle"); clearTimeout(fsIdleTimer); }
+  els.fsBtn.textContent = on ? "⛶ Exit" : "⛶";
+  els.fsBtn.title = on ? "Exit fullscreen (F / Esc)" : "Fullscreen (F)";
+  els.fsBtn.classList.toggle("active", on);
+  fsRelayout();
+  if (on) fsPoke();
+}
+async function toggleFullscreen() {
+  els.fsBtn.blur();   // so the next Space plays/pauses instead of re-clicking
+  if (isFullscreen()) {
+    if (fsFallback) { fsFallback = false; syncFullscreen(); }
+    else if (document.fullscreenElement) await document.exitFullscreen().catch(() => {});
+    return;
+  }
+  if (els.playerWrap.requestFullscreen) {
+    try { await els.playerWrap.requestFullscreen(); return; } catch (e) { /* fall through */ }
+  }
+  fsFallback = true;
+  syncFullscreen();
+}
+document.addEventListener("fullscreenchange", syncFullscreen);
+els.fsBtn.addEventListener("click", toggleFullscreen);
+els.player.addEventListener("dblclick", toggleFullscreen);
+els.playerWrap.addEventListener("mousemove", fsPoke);
+els.player.addEventListener("play", fsPoke);
+els.player.addEventListener("pause", fsPoke);
+
 // The checkbox sits inside the Brightness <label>, whose implicit control is
 // the slider -- so clicking its caption must toggle the box by hand.
 els.brightAllText.addEventListener("click", (e) => {
@@ -3596,6 +3690,7 @@ document.addEventListener("keydown", (e) => {
   const tag = (e.target.tagName || "").toLowerCase();
   if (tag === "input" || tag === "textarea" || tag === "select") return;
   if (e.target.isContentEditable) return;
+  if (e.key === "f" || e.key === "F") { e.preventDefault(); toggleFullscreen(); return; }
   if (cropEditing) return;  // the crop editor owns the keyboard (Esc handled above)
 
   if (!els.player.src) return;

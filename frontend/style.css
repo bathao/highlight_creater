@@ -231,6 +231,35 @@ input[type="range"] {
 }
 .overlay.hidden { display: none; }
 
+/* ----- Fullscreen (the video box only) -----
+   The wrapper goes fullscreen (not the bare <video>) so the text-overlay
+   layer, crop preview/editor and brightness filter keep their geometry.
+   While fullscreen, the timeline + control bar + preview bar are moved into
+   .fs-chrome inside the wrapper and auto-hide like a normal video player. */
+.player-wrap:fullscreen,
+.player-wrap.is-fs { aspect-ratio: auto; width: 100%; height: 100%; border-radius: 0; }
+.player-wrap::backdrop { background: #000; }
+/* Theatre-mode fallback when the Fullscreen API is unavailable/refused. */
+.player-wrap.is-fs.fs-fallback { position: fixed; inset: 0; z-index: 900; width: 100vw; height: 100vh; }
+.player-wrap.is-fs { cursor: default; }
+.player-wrap.is-fs.idle { cursor: none; }
+.fs-chrome {
+  position: absolute; left: 0; right: 0; bottom: 0;
+  z-index: 7; /* above the crop editor (6); hidden while cropping anyway */
+  display: flex; flex-direction: column;
+  padding: 28px 12px 6px;
+  background: linear-gradient(180deg, rgba(0,0,0,0) 0%, rgba(0,0,0,0.55) 35%, rgba(0,0,0,0.85) 100%);
+  transition: opacity 0.2s;
+}
+.fs-chrome .timeline { margin-top: 0; padding: 6px 4px; }
+.fs-chrome .player-controls { margin-top: 0; padding: 4px 0 0; }
+.fs-chrome .preview-bar { margin: 0 0 4px; background: rgba(13, 19, 34, 0.85); }
+.player-wrap.is-fs.idle .fs-chrome { opacity: 0; pointer-events: none; }
+/* The crop editor owns the bottom of the frame (its own toolbar sits there). */
+.player-wrap.is-fs:has(.crop-editor:not(.hidden)) .fs-chrome { display: none; }
+.ctrl-btn.fs-btn { padding: 6px 9px; font-size: 15px; line-height: 1; }
+.ctrl-btn.fs-btn.active { border-color: #4a7dff; color: #fff; }
+
 /* ----- Custom timeline ----- */
 .timeline {
   position: relative;
