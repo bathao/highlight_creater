@@ -1,6 +1,6 @@
 # TODO — Highlight Creator
 
-> Open work items, ordered by priority. Last synced against the code: 2026-10-10 (v1.12 — fullscreen for the video box, `bfcbfe9`; before that no code changes since v1.11 `2783163` / docs `9cfee99`, 2026-09-27; v1.11 in production use 2026-09-27 → 2026-10-09 (5 full renders + 2 per-event exports, 1080p tier, crop visibly in use); v1.10 `f04ec61` used 2026-09-26 (two 720p renders); v1.9 `e35d43b`; v1.8.1 used 2026-09-11 → 2026-09-23; manual crop checklist still pending; pushed to GitHub `origin` = https://github.com/bathao/highlight_creater on 2026-10-10).
+> Open work items, ordered by priority. Last synced against the code: 2026-10-25 (v1.13 — Export full source, **uncommitted**; before that no code changes since v1.12 `bfcbfe9` / docs `92d733d`, 2026-10-10; v1.12 in use — a 720p full render on 2026-10-15 + two 1080p per-event exports on 2026-10-24, earlier outputs deleted by hand again; before that no code changes since v1.11 `2783163` / docs `9cfee99`, 2026-09-27; v1.11 in production use 2026-09-27 → 2026-10-09 (5 full renders + 2 per-event exports, 1080p tier, crop visibly in use); v1.10 `f04ec61` used 2026-09-26 (two 720p renders); v1.9 `e35d43b`; v1.8.1 used 2026-09-11 → 2026-09-23; manual crop checklist still pending; pushed to GitHub `origin` = https://github.com/bathao/highlight_creater on 2026-10-10).
 > See [progress.md](progress.md) for everything already done.
 
 ---
@@ -30,7 +30,7 @@
   - Job state currently lives only in RAM (`_JOBS` dict) — closing the tab loses it
   - List the 10 most recent jobs in the UI, click to open the output
   - 💡 Quickest first step: the backend already has `GET /api/outputs` ([backend/main.py:487](backend/main.py#L487)) listing rendered files — the frontend **still doesn't call it**. Wire that into the UI before building full job history
-  - 📈 Still relevant: 19 rendered files (~3.6 GB) had piled up by 2026-09-24 and were deleted by hand in Explorer on/before 2026-09-27 — the UI still cannot list, open or delete outputs. Growing again: 9 files / 2.5 GB on disk as of 2026-10-10 (7 full renders + 2 per-event exports, 2026-09-26 → 2026-10-09)
+  - 📈 Still relevant: 19 rendered files (~3.6 GB) had piled up by 2026-09-24 and were deleted by hand in Explorer on/before 2026-09-27 — the UI still cannot list, open or delete outputs. Growing again: 9 files / 2.5 GB on 2026-10-10, then 7 of them deleted by hand in Explorer; 5 files / 2.0 GB as of 2026-10-25 (3 full renders + 2 per-event exports) — the second manual cleanup since September
 
 - [ ] **Audio normalize** with the `loudnorm` filter
   - `sounds/slow_motion.mp3` can be much louder/quieter than the source audio — normalize both to the same LUFS
@@ -109,6 +109,7 @@
 
 Summary: full render pipeline (intro + real + slow-mo + concat), NVENC, byte-range streaming, SSE progress, project CRUD, custom timeline + control bar, keyboard shortcuts, auto-persisted state, single-clip export, 1-click `start.bat` launcher.
 
+- **v1.13 (2026-10-25):** Export full source — ⤓ button under ✂ Crop in the Setup card exports the whole source now viewing with its brightness + crop burned in, at the chosen output resolution (`POST /api/export-source`, single-clip pipeline with one clip 0 → duration, file `<source>_full_<ts>.mp4`). 16/16 E2E checks through the live server. **Not committed yet.**
 - **v1.12 (2026-10-10):** fullscreen for the video box — ⛶ button / F / double-click puts `.player-wrap` into browser fullscreen; timeline + control bar + preview bar are reparented into an auto-hiding bottom chrome and restored on exit; overlays, crop and brightness keep their geometry; theatre-mode fallback when the API is refused. 32/32 headless checks + brightness-in-fullscreen luma check. Committed `bfcbfe9`.
 - **v1.11 (2026-09-27):** "Auto for all sources" brightness mode (offscreen per-source analysis + auto level, manual takeover, exclusive with apply-to-all, render/export wait for pending levels) + 🔊 preview volume/mute in the player bar; fixed the double busy-guard and idempotent histogram normalisation. 21/21 new + 40/40 regression headless checks. Committed `2783163`. Wider slider range (±100) was proposed and **declined by the user** — stays ±50.
 - **v1.10 (2026-09-25):** smart brightness — one level, auto-derived gain/gamma/contrast/saturation from per-source frame analysis, plus ✨ Auto (picks the level from the frame's luma histogram); preview (SVG filter) and export (RGB `lutrgb`+`colorchannelmixer`) now run identical maths, fixing the pale colours the luma-only `eq` export produced. Verified synthetic + real 10-bit BT.709 frames, 20/20 + 11/11 headless checks, live export. Committed `f04ec61`.

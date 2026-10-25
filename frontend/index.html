@@ -117,6 +117,13 @@
         </div>
         <small class="hint">Per source video — zoom to a region; applies to every event from this source and to exports. Small crops of low-res sources will look soft.</small>
       </label>
+      <label>⤓ Export source: <span id="exportSourceInfo">—</span>
+        <div class="crop-row">
+          <button id="exportSourceBtn" type="button" class="btn small primary" disabled
+                  title="Export the whole video now viewing as one file, with its brightness and crop burned in — no intro, slow-mo or events">⤓ Export full source</button>
+        </div>
+        <small class="hint">The whole video now viewing, with the brightness and crop above burned in, at the output resolution below. Progress shows in 4 · Export Video; the file lands in the output folder as <code>&lt;source&gt;_full_&lt;time&gt;.mp4</code>.</small>
+      </label>
       <label>Slow-motion: <span id="slowLabel">50%</span>
         <input id="slowSlider" type="range" min="10" max="100" step="5" value="50" />
         <small class="hint" id="slowHint">Plays at 50% of real speed (2× slower)</small>
@@ -125,7 +132,7 @@
         <select id="resolutionSelect" title="Choose output resolution — max = source video resolution">
           <option value="0">Auto</option>
         </select>
-        <small class="hint" id="resHint">Applies to all exports (full render + per-event Export / Export + Replay). Capped at the source resolution, never upscaled.</small>
+        <small class="hint" id="resHint">Applies to all exports (full render, per-event Export / Export + Replay, Export full source). Capped at the source resolution, never upscaled.</small>
       </label>
     </div>
   </section>

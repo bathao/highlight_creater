@@ -723,6 +723,53 @@ async def export_clip(req: ExportClipRequest) -> JSONResponse:
     return JSONResponse({"job_id": job.job_id})
 
 
+class ExportSourceRequest(BaseModel):
+    """Export the WHOLE source video with its per-source look burned in."""
+    video: str
+    out_height: int = Field(ge=0, le=2160, default=0)  # 0 = native source height
+    brightness: float = Field(ge=-50, le=50, default=0)  # per-source brightness (%)
+    color: Optional[ColorModel] = None  # derived look; None = derive from brightness
+    crop: Optional[CropModel] = None  # per-source crop region; None = full frame
+
+
+@app.post("/api/export-source")
+async def export_source(req: ExportSourceRequest) -> JSONResponse:
+    """Export the whole source video as one file — the same brightness/colour
+    and crop the player shows, burned in, at the chosen output resolution.
+    No intro, slow-mo or events: this reuses the single-clip pipeline with one
+    real-speed clip spanning the probed duration, so the look is bit-identical
+    to the per-event exports and the main render.
+    """
+    video_path = _safe_source_path(req.video)
+    info = render.probe_video(video_path)
+    duration = float(info.get("duration") or 0.0)
+    if duration <= 0.05:
+        raise HTTPException(400, "Could not read the source video's duration")
+
+    clip = render.Clip(start=0.0, end=duration, slowmo=False,
+                       video_path=video_path, brightness=req.brightness,
+                       color=req.color.model_dump() if req.color else None,
+                       crop=req.crop.model_dump() if req.crop else None)
+
+    job = render.RenderJob(
+        job_id=uuid.uuid4().hex[:12],
+        video_path=video_path,
+        clips=[clip],
+        slow_ratio=0.5,              # unused: no slow-mo segment
+        intro_seconds=0.0,           # no intro card
+        tournament="",
+        player1="",
+        player2="",
+        output_basename=f"{Path(req.video).stem}_full",
+        out_height=req.out_height,
+    )
+    render.register_job(job)
+
+    t = threading.Thread(target=render.run_job, args=(job,), daemon=True)
+    t.start()
+    return JSONResponse({"job_id": job.job_id, "duration": duration})
+
+
 @app.post("/api/render")
 async def start_render(req: RenderRequest) -> JSONResponse:
     if not req.clips:

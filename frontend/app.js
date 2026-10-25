@@ -35,6 +35,8 @@ const els = {
   fxSat: $("fxSat"),
   cropBtn: $("cropBtn"),
   cropLabel: $("cropLabel"),
+  exportSourceBtn: $("exportSourceBtn"),
+  exportSourceInfo: $("exportSourceInfo"),
   cropEditor: $("cropEditor"),
   cropRegion: $("cropRegion"),
   cropFree: $("cropFree"),
@@ -804,6 +806,7 @@ function updateBrightnessControl() {
   }
   els.brightAnalyze.disabled = !currentVideo;
   els.brightAutoBtn.disabled = !currentVideo;
+  updateExportSourceControl();
 }
 
 // ---- Per-source crop --------------------------------------------------
@@ -900,6 +903,23 @@ function updateCropControl() {
   els.cropLabel.textContent = c
     ? `${Math.round(c.w * 100)}% × ${Math.round(c.h * 100)}% @ (${Math.round(c.x * 100)}%, ${Math.round(c.y * 100)}%)`
     : "full frame";
+  updateExportSourceControl();
+}
+
+// "Export full source" lives under the per-source look controls (brightness +
+// crop) because its input is exactly that: the source now viewing and the look
+// set for it. Enabled whenever a source is selected (no events needed).
+function updateExportSourceControl() {
+  if (!els.exportSourceBtn) return;
+  els.exportSourceBtn.disabled = !currentVideo;
+  if (!currentVideo) { els.exportSourceInfo.textContent = "—"; return; }
+  const info = probeCache[currentVideo];
+  const b = getBrightness(currentVideo);
+  const look = [b ? `brightness ${b > 0 ? "+" : ""}${b}%` : "", getCrop(currentVideo) ? "crop" : ""]
+    .filter(Boolean).join(" + ") || "no adjustments";
+  els.exportSourceInfo.textContent = info && info.duration
+    ? `${baseName(currentVideo)} · ${fmtClock(info.duration)} · ${look}`
+    : `${baseName(currentVideo)} · ${look}`;
 }
 
 // One pending "source finished loading" callback. Every source switch
@@ -971,6 +991,7 @@ async function selectVideo(path) {
     els.playerInfo.textContent = baseName(path);
   }
   refreshResolutionOptions();
+  updateExportSourceControl();   // duration is known now
   saveState();
   if (brightnessAuto) ensureAutoLevel(path);
 }
@@ -3113,6 +3134,53 @@ async function exportSingleClip(clip, includeSlowmo) {
   }
 }
 
+// Export the WHOLE source now viewing as one file with its look burned in
+// (brightness/colour + crop, at the chosen output resolution). Same busy
+// guard, progress box and result handling as the per-event exports.
+async function exportFullSource() {
+  if (!currentVideo) { flashTopMessage("Pick a source video first"); return; }
+  await ensureAllAutoLevels();   // an auto level may still be pending for this source
+  if (guardRenderBusy()) return;
+  const video = currentVideo;
+  els.renderBtn.disabled = true;
+  els.cancelBtn.disabled = false;
+  els.progressBox.classList.remove("hidden");
+  els.resultBox.classList.add("hidden");
+  els.progressFill.style.width = "0%";
+  els.progressFill.style.background = "";
+  els.progressPct.textContent = "0%";
+  const b = getBrightness(video);
+  const look = [b ? `brightness ${b > 0 ? "+" : ""}${b}%` : "", getCrop(video) ? "crop" : ""]
+    .filter(Boolean).join(" + ");
+  els.progressStage.textContent = `Exporting full source${look ? ` (${look})` : ""}…`;
+  els.progressMsg.textContent = baseName(video);
+  els.progressBox.scrollIntoView({ behavior: "smooth", block: "nearest" });
+
+  try {
+    const body = {
+      video,
+      out_height: outHeight || 0,
+      brightness: b,
+      color: getColorParams(video),
+      crop: getCrop(video),
+    };
+    const res = await fetch("/api/export-source", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const t = await res.text();
+      throw new Error(t || `HTTP ${res.status}`);
+    }
+    const data = await res.json();
+    currentJobId = data.job_id;
+    listenProgress(currentJobId);
+  } catch (e) {
+    showRenderError(e.message || String(e));
+  }
+}
+
 async function startRender() {
   if (!clips.length) return;
   // Validate clips
@@ -3676,6 +3744,7 @@ els.clearClips.addEventListener("click", () => {
 els.undoClipBtn.addEventListener("click", undoClips);
 
 els.renderBtn.addEventListener("click", startRender);
+els.exportSourceBtn.addEventListener("click", exportFullSource);
 els.cancelBtn.addEventListener("click", cancelRender);
 els.openFolderBtn.addEventListener("click", openOutputFolder);
 els.newRenderBtn.addEventListener("click", () => {
