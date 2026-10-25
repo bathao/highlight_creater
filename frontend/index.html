@@ -176,7 +176,11 @@
         <div class="timeline-progress" id="timelineProgress"></div>
         <div class="timeline-thumb" id="timelineThumb"></div>
       </div>
-      <div class="timeline-tooltip" id="timelineTooltip">00:00</div>
+      <!-- Hover tooltip: a live frame thumbnail (raw-source timeline only) + the time. -->
+      <div class="timeline-tooltip" id="timelineTooltip">
+        <canvas class="tl-thumb" id="timelineThumbCanvas" width="192" height="108" hidden></canvas>
+        <span id="timelineTooltipTime">00:00</span>
+      </div>
     </div>
 
     <!-- Custom control bar -->
@@ -201,7 +205,7 @@
         </span>
         <label class="ctrl-speed">
           <span class="muted">speed</span>
-          <select id="speedSelect" title="Preview playback speed">
+          <select id="speedSelect" title="Preview playback speed — the preview is muted automatically at any speed other than 1× (audio sounds bad when sped up or slowed down)">
             <option value="0.25">0.25x</option>
             <option value="0.5">0.5x</option>
             <option value="0.75">0.75x</option>

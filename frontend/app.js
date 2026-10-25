@@ -55,6 +55,8 @@ const els = {
   timelineBuffered: $("timelineBuffered"),
   timelineThumb: $("timelineThumb"),
   timelineTooltip: $("timelineTooltip"),
+  timelineTooltipTime: $("timelineTooltipTime"),
+  timelineThumbCanvas: $("timelineThumbCanvas"),
   playBtn: $("playBtn"),
   playIcon: $("playIcon"),
   playText: $("playText"),
@@ -953,6 +955,7 @@ async function selectVideo(path) {
   }
   if (!path) {
     currentVideo = null;
+    thumbRelease();
     els.player.removeAttribute("src");
     els.player.load();
     els.overlay.classList.remove("hidden");
@@ -967,9 +970,10 @@ async function selectVideo(path) {
     renderTextOverlays();
     return;
   }
+  if (path !== currentVideo) thumbRelease();
   currentVideo = path;
   els.player.src = `/api/source-stream?path=${encodeURIComponent(path)}`;
-  els.player.playbackRate = parseFloat(els.speedSelect.value) || 1;
+  els.player.defaultPlaybackRate = parseFloat(els.speedSelect.value) || 1;  // load() applies it
   els.player.load();
   els.overlay.classList.add("hidden");
   updatePickLabel();
@@ -1272,7 +1276,11 @@ document.querySelectorAll(".ctrl-btn[data-skip]").forEach(btn => {
 });
 
 els.speedSelect.addEventListener("change", () => {
-  els.player.playbackRate = parseFloat(els.speedSelect.value) || 1;
+  const rate = parseFloat(els.speedSelect.value) || 1;
+  // load() resets playbackRate to defaultPlaybackRate, so set both — a
+  // source switch used to silently drop back to 1× while the select said 2×.
+  els.player.defaultPlaybackRate = rate;
+  els.player.playbackRate = rate;
 });
 
 // ---- Timeline scrubbing --------------------------------------------
@@ -1298,8 +1306,88 @@ function timelineHoverFromEvent(e) {
   const d = els.player.duration || 0;
   if (!d) { els.timelineTooltip.style.opacity = "0"; return; }
   const pct = timelineFracFromEvent(e);
-  els.timelineTooltip.textContent = fmt(pct * d);
-  els.timelineTooltip.style.left = `${pct * 100}%`;
+  const t = pct * d;
+  els.timelineTooltipTime.textContent = fmt(t);
+  // Centre the tooltip on the pointer, but keep it inside the bar (the
+  // thumbnail makes it wide enough to spill past the ends otherwise).
+  const W = els.timeline.clientWidth, half = els.timelineTooltip.offsetWidth / 2;
+  els.timelineTooltip.style.left = `${Math.max(half, Math.min(W - half, pct * W))}px`;
+  els.timelineTooltip.style.opacity = "";
+  thumbRequest(t);
+}
+
+// ---- Timeline hover thumbnails (raw-source timeline only) -----------------
+// A hidden second <video> on the same source seeks to the hovered time and
+// the frame is drawn into the small canvas inside the tooltip — the same
+// idea as the offscreen brightness analyser. Measured on a 2688×1512 HEVC
+// DJI file: median seek 28 ms, p90 39 ms, so no server-side sprite sheet is
+// needed. Seeks are coalesced (latest hover wins, one in flight). The canvas
+// shows the source's crop region and carries the player's colour filter, so
+// it is WYSIWYG. Not used on the Preview-output timeline (user's decision):
+// that timeline is a different element and the raw bar is disabled then.
+const THUMB_W = 192, THUMB_H = 108;
+let thumbVideo = null;     // the hidden decoder
+let thumbSrc = null;       // source path it is loaded with
+let thumbReady = false;    // loadeddata seen for thumbSrc
+let thumbBusy = false;     // a seek is in flight
+let thumbWant = null;      // latest requested time (null = nothing pending)
+let thumbWatchdog = null;
+
+function thumbEnsureVideo() {
+  if (!currentVideo || !els.player.src) return null;
+  if (!thumbVideo) {
+    thumbVideo = document.createElement("video");
+    thumbVideo.muted = true; thumbVideo.preload = "auto"; thumbVideo.playsInline = true;
+    thumbVideo.addEventListener("loadeddata", () => { thumbReady = true; thumbPump(); });
+    thumbVideo.addEventListener("seeked", thumbDraw);
+    thumbVideo.addEventListener("error", () => { thumbReady = false; els.timelineThumbCanvas.hidden = true; });
+  }
+  if (thumbSrc !== currentVideo) {
+    thumbSrc = currentVideo; thumbReady = false; thumbBusy = false;
+    els.timelineThumbCanvas.hidden = true;
+    thumbVideo.src = els.player.currentSrc || els.player.src;   // same byte-range stream
+    thumbVideo.load();
+  }
+  return thumbVideo;
+}
+// Drop the decoder's source (source cleared / switched) — reloaded lazily on
+// the next hover.
+function thumbRelease() {
+  if (thumbVideo && thumbSrc) { thumbVideo.removeAttribute("src"); thumbVideo.load(); }
+  thumbSrc = null; thumbReady = false; thumbBusy = false; thumbWant = null;
+  clearTimeout(thumbWatchdog);
+  if (els.timelineThumbCanvas) els.timelineThumbCanvas.hidden = true;
+}
+function thumbRequest(t) {
+  if (!thumbEnsureVideo()) return;
+  thumbWant = t;
+  thumbPump();
+}
+function thumbPump() {
+  if (!thumbVideo || !thumbReady || thumbBusy || thumbWant === null) return;
+  const t = thumbWant; thumbWant = null;
+  if (Math.abs(thumbVideo.currentTime - t) < 0.02 && thumbVideo.readyState >= 2) { thumbDraw(); return; }
+  thumbBusy = true;
+  thumbVideo.currentTime = t;
+  // A seek that never reports back must not wedge the queue.
+  clearTimeout(thumbWatchdog);
+  thumbWatchdog = setTimeout(() => { if (thumbBusy) { thumbBusy = false; thumbPump(); } }, 1500);
+}
+function thumbDraw() {
+  thumbBusy = false;
+  clearTimeout(thumbWatchdog);
+  const v = thumbVideo, c = els.timelineThumbCanvas;
+  if (!v || !c || v.readyState < 2 || !v.videoWidth || thumbSrc !== currentVideo) { thumbPump(); return; }
+  const ctx = c.getContext("2d");
+  const crop = getCrop(currentVideo);
+  const sx = crop ? crop.x * v.videoWidth : 0, sy = crop ? crop.y * v.videoHeight : 0;
+  const sw = crop ? crop.w * v.videoWidth : v.videoWidth, sh = crop ? crop.h * v.videoHeight : v.videoHeight;
+  const r = fitRect(sw, sh, THUMB_W, THUMB_H);
+  ctx.fillStyle = "#000"; ctx.fillRect(0, 0, THUMB_W, THUMB_H);
+  if (r) ctx.drawImage(v, sx, sy, sw, sh, r.x, r.y, r.w, r.h);
+  c.style.filter = els.player.style.filter;   // same colour chain as the player
+  c.hidden = false;
+  thumbPump();   // a newer hover may have arrived while this seek was in flight
 }
 
 els.timeline.addEventListener("mousedown", (e) => {
@@ -3440,13 +3528,30 @@ els.brightAutoAllText.addEventListener("click", (e) => {
 function effectivePlayerVolume() {
   return Math.max(0, Math.min(1, playerVolume * (pvMode ? Math.min(1, music.originalVolume) : 1)));
 }
+// Audio at any speed other than 1× sounds bad (pitch-shifted / choppy), so
+// the preview is muted automatically while the playback rate is not 1 — the
+// volume slider keeps the user's value and sound returns the moment the rate
+// is back to 1×. Covers the speed select AND the slow-mo segments of Preview
+// output (the render replaces the original audio with music there anyway).
+// Export audio is unaffected.
+function speedMuteActive() {
+  return Math.abs((els.player.playbackRate || 1) - 1) > 0.001;
+}
 function updateVolumeControl() {
+  const sm = speedMuteActive();
   els.volSlider.value = Math.round(playerVolume * 100);
-  els.volBtn.textContent = playerVolume === 0 ? "🔇" : playerVolume < 0.5 ? "🔉" : "🔊";
-  els.volBtn.title = playerVolume === 0 ? "Unmute" : "Mute";
+  els.volBtn.textContent = (sm || playerVolume === 0) ? "🔇" : playerVolume < 0.5 ? "🔉" : "🔊";
+  els.volBtn.title = sm
+    ? `Muted while the speed is ${els.player.playbackRate}× — audio sounds bad at other speeds; sound returns at 1×`
+    : playerVolume === 0 ? "Unmute" : "Mute";
+  els.volBtn.classList.toggle("speed-muted", sm);
   els.volSlider.title = `Preview volume ${Math.round(playerVolume * 100)}% (export audio is not affected)`;
   els.player.volume = effectivePlayerVolume();
+  els.player.muted = sm;
 }
+// Every rate change (speed select, preview slow-mo segments, preview exit,
+// source switch) lands here.
+els.player.addEventListener("ratechange", updateVolumeControl);
 let volumeBeforeMute = 1;
 els.volSlider.addEventListener("input", (e) => {
   playerVolume = Math.max(0, Math.min(1, (parseInt(e.target.value, 10) || 0) / 100));
