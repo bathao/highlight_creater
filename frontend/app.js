@@ -37,6 +37,12 @@ const els = {
   cropLabel: $("cropLabel"),
   exportSourceBtn: $("exportSourceBtn"),
   exportSourceInfo: $("exportSourceInfo"),
+  trimStart: $("trimStart"),
+  trimEnd: $("trimEnd"),
+  trimStartBtn: $("trimStartBtn"),
+  trimEndBtn: $("trimEndBtn"),
+  trimResetBtn: $("trimResetBtn"),
+  trimMsg: $("trimMsg"),
   cropEditor: $("cropEditor"),
   cropRegion: $("cropRegion"),
   cropFree: $("cropFree"),
@@ -54,6 +60,8 @@ const els = {
   timelineProgress: $("timelineProgress"),
   timelineBuffered: $("timelineBuffered"),
   timelineThumb: $("timelineThumb"),
+  timelineTrimL: $("timelineTrimL"),
+  timelineTrimR: $("timelineTrimR"),
   timelineTooltip: $("timelineTooltip"),
   timelineTooltipTime: $("timelineTooltipTime"),
   timelineThumbCanvas: $("timelineThumbCanvas"),
@@ -182,6 +190,11 @@ let playerVolume = 1;
 // onto ffmpeg's crop filter, so what you see is what gets burned in.
 let sourceCrop = {};
 let cropEditing = false; // crop editor open (player shows the full frame)
+// Per-source part for "Export source": video path -> {start, end} seconds on
+// the source's own timeline (end null = to the end); absent = whole video.
+// Only the Export source button uses it -- events and the main render keep
+// their own times. Persisted to localStorage (not to project files).
+let sourceTrim = {};
 
 // Text overlays burned onto the final video. Each: {id,text,font,sizePct,
 // color,x,y,start,end,shadow}. x/y are the text CENTRE as a fraction of the
@@ -258,6 +271,7 @@ function saveState() {
       sourceMode,
       sourceStats,
       sourceCrop,
+      sourceTrim,
       playerVolume,
     }));
   } catch (e) { /* ignore */ }
@@ -302,6 +316,10 @@ function loadState() {
     if (s.sourceCrop && typeof s.sourceCrop === "object") {
       sourceCrop = {};
       for (const [path, c] of Object.entries(s.sourceCrop)) setCrop(path, c);
+    }
+    if (s.sourceTrim && typeof s.sourceTrim === "object") {
+      sourceTrim = {};
+      for (const [path, t] of Object.entries(s.sourceTrim)) setTrim(path, t);
     }
   } catch (e) { /* ignore */ }
 }
@@ -908,20 +926,185 @@ function updateCropControl() {
   updateExportSourceControl();
 }
 
-// "Export full source" lives under the per-source look controls (brightness +
+// "Export source" lives under the per-source look controls (brightness +
 // crop) because its input is exactly that: the source now viewing and the look
 // set for it. Enabled whenever a source is selected (no events needed).
+// From / To (v1.15) pick the part to keep; the button then reads "Export
+// selected part" and the readout shows the kept range.
 function updateExportSourceControl() {
   if (!els.exportSourceBtn) return;
+  renderTrimFields();
+  renderTimelineTrim();
+  const trim = currentVideo ? getTrim(currentVideo) : null;
   els.exportSourceBtn.disabled = !currentVideo;
+  els.exportSourceBtn.textContent = trim ? "⤓ Export selected part" : "⤓ Export full source";
+  els.exportSourceBtn.title = trim
+    ? "Export only From → To of the video now viewing as one file, with its brightness and crop burned in — no intro, slow-mo or events"
+    : "Export the whole video now viewing as one file, with its brightness and crop burned in — no intro, slow-mo or events";
+  els.trimResetBtn.classList.toggle("hidden", !trim);
+  els.trimResetBtn.disabled = !currentVideo || pvMode;
   if (!currentVideo) { els.exportSourceInfo.textContent = "—"; return; }
-  const info = probeCache[currentVideo];
+  const dur = sourceDuration(currentVideo);
   const b = getBrightness(currentVideo);
   const look = [b ? `brightness ${b > 0 ? "+" : ""}${b}%` : "", getCrop(currentVideo) ? "crop" : ""]
     .filter(Boolean).join(" + ") || "no adjustments";
-  els.exportSourceInfo.textContent = info && info.duration
-    ? `${baseName(currentVideo)} · ${fmtClock(info.duration)} · ${look}`
-    : `${baseName(currentVideo)} · ${look}`;
+  let span = dur > 0 ? fmtClock(dur) : "";
+  if (trim) {
+    const end = trim.end !== null ? trim.end : dur;
+    span = end > 0
+      ? `${fmtClock(trim.start)} → ${fmtClock(end)}` +
+        (dur > 0 ? ` (${fmtClock(end - trim.start)} of ${fmtClock(dur)})` : "")
+      : `${fmtClock(trim.start)} → end`;
+  }
+  els.exportSourceInfo.textContent = [baseName(currentVideo), span, look].filter(Boolean).join(" · ");
+}
+
+// ---- Export source: the part to keep (From / To) ----------------------
+const MIN_PART_SEC = 0.5;   // mirrors MIN_PART_SECONDS in backend/main.py
+
+function getTrim(path) {
+  return (path && sourceTrim[path]) || null;
+}
+
+// Seconds of a source: the cached probe or, for the source in the player,
+// the element's own duration. 0 = not known yet.
+function sourceDuration(path) {
+  if (!path) return 0;
+  const info = probeCache[path];
+  if (info && info.duration > 0) return info.duration;
+  const d = els.player.duration;
+  if (path === currentVideo && isFinite(d) && d > 0) return d;
+  return 0;
+}
+
+// Clamp + store a part; the whole video deletes the key (mirrors crop) so the
+// map stays sparse and an untouched source exports exactly as before. `end`
+// null = to the end of the video (also what an end at the duration becomes).
+function setTrim(path, t) {
+  if (!path) return;
+  if (!t || typeof t !== "object") { delete sourceTrim[path]; return; }
+  const r3 = n => Math.round(n * 1000) / 1000;
+  const start = r3(clampNum(t.start, 0, 1e7, 0));
+  let end = (t.end === null || t.end === undefined) ? null : clampNum(t.end, 0, 1e7, null);
+  if (end !== null) end = r3(end);
+  const dur = sourceDuration(path);
+  if (end !== null && dur > 0 && end >= dur - 0.0005) end = null;
+  if (end !== null && end - start < MIN_PART_SEC) { delete sourceTrim[path]; return; }
+  if (start <= 0.0005 && end === null) { delete sourceTrim[path]; return; }
+  sourceTrim[path] = { start, end };
+}
+
+// Short feedback next to the fields, mirrored to the player's status line
+// (that is what is in view when [ / ] are pressed while watching) unless a
+// capture is running there.
+let _trimMsgTimer = null;
+function trimNote(msg, isError = false) {
+  els.trimMsg.textContent = msg;
+  els.trimMsg.classList.toggle("error", !!isError);
+  els.trimMsg.classList.remove("hidden");
+  clearTimeout(_trimMsgTimer);
+  _trimMsgTimer = setTimeout(clearTrimNote, 3500);
+  if (captureStart === null) flashTopMessage(msg);
+}
+function clearTrimNote() {
+  clearTimeout(_trimMsgTimer);
+  if (els.trimMsg) els.trimMsg.classList.add("hidden");
+}
+
+// Change one side of the current source's part. `value` = seconds, or null to
+// clear that side (From -> start of the video, To -> its end). An invalid
+// edit is refused with a note and the stored part stays as it was.
+function applyTrimEdit(side, value) {
+  const path = currentVideo;
+  if (!path) return false;
+  const cur = getTrim(path) || { start: 0, end: null };
+  let start = cur.start, end = cur.end;
+  if (side === "start") start = value === null ? 0 : value;
+  else end = value;
+  if (!isFinite(start) || start < 0 || (end !== null && !(isFinite(end) && end > 0))) {
+    trimNote("Not a valid time — type m:ss (e.g. 2:30), h:mm:ss or seconds", true);
+    return false;
+  }
+  const dur = sourceDuration(path);
+  if (end !== null && dur > 0 && end >= dur - 0.0005) end = null;   // past the end = to the end
+  const endEff = end !== null ? end : (dur > 0 ? dur : Infinity);
+  if (endEff - start < MIN_PART_SEC) {
+    trimNote(side === "start"
+      ? `From must be at least ${MIN_PART_SEC} s before To (${fmt(endEff)})`
+      : `To must be at least ${MIN_PART_SEC} s after From (${fmt(start)})`, true);
+    return false;
+  }
+  setTrim(path, { start, end });
+  saveState();
+  updateExportSourceControl();
+  return true;
+}
+
+// ⇤ / ⇥ Playhead buttons and the [ / ] keys.
+function setTrimFromPlayhead(side) {
+  if (!currentVideo || !els.player.src) { trimNote("Pick a source video first", true); return; }
+  if (pvMode) {
+    trimNote("Leave Preview output first — From / To belong to one source video", true);
+    return;
+  }
+  // ffmpeg starts at the first frame with pts >= From, so From is floored to
+  // the millisecond: rounding up could skip the frame shown in the player.
+  const ct = els.player.currentTime || 0;
+  const t = side === "start" ? Math.floor(ct * 1000) / 1000 : Math.round(ct * 1000) / 1000;
+  if (!applyTrimEdit(side, t)) return;
+  const trim = getTrim(currentVideo);
+  if (side === "start") trimNote(trim ? `Export from ${fmt(t)}` : "Export from the start of the video");
+  else trimNote(trim && trim.end !== null ? `Export up to ${fmt(t)}` : "Export up to the end of the video");
+}
+
+// Typed value (on Enter / leaving the field). Empty = that side cleared.
+function commitTrimField(side) {
+  const input = side === "start" ? els.trimStart : els.trimEnd;
+  const raw = input.value.trim();
+  if (!applyTrimEdit(side, raw === "" ? null : parseTime(raw))) {
+    input.classList.add("invalid");
+    setTimeout(() => input.classList.remove("invalid"), 1400);
+  }
+  renderTrimFields(true);   // show the stored value, normalised (or unchanged)
+}
+
+// Fields + Playhead buttons. A field being typed in is left alone unless
+// `force`. Locked during Preview output: the player then hops between the
+// events' sources, so "the source now viewing" keeps changing.
+function renderTrimFields(force = false) {
+  if (!els.trimStart) return;
+  const has = !!currentVideo;
+  const trim = has ? getTrim(currentVideo) : null;
+  const dur = has ? sourceDuration(currentVideo) : 0;
+  const locked = !has || pvMode;
+  els.trimStart.disabled = els.trimEnd.disabled = locked;
+  els.trimStartBtn.disabled = els.trimEndBtn.disabled = locked;
+  els.trimEnd.placeholder = dur > 0 ? fmt(dur) : "end";
+  const put = (input, v) => { if (force || document.activeElement !== input) input.value = v; };
+  put(els.trimStart, trim && trim.start > 0 ? fmt(trim.start) : "");
+  put(els.trimEnd, trim && trim.end !== null ? fmt(trim.end) : "");
+}
+
+// Dim the parts of the raw-source timeline that Export source cuts off.
+// Display only (clicking / dragging still seeks). Hidden in Preview output,
+// where the raw bar mirrors the assembled output instead of one source.
+function renderTimelineTrim() {
+  const L = els.timelineTrimL, R = els.timelineTrimR;
+  if (!L || !R) return;
+  const trim = currentVideo ? getTrim(currentVideo) : null;
+  const pd = els.player.duration;
+  const d = isFinite(pd) && pd > 0 ? pd : sourceDuration(currentVideo);
+  if (!trim || !(d > 0) || pvMode) {
+    L.classList.add("hidden");
+    R.classList.add("hidden");
+    return;
+  }
+  const a = Math.max(0, Math.min(1, trim.start / d));
+  const b = trim.end === null ? 1 : Math.max(a, Math.min(1, trim.end / d));
+  L.classList.toggle("hidden", !(a > 0));
+  R.classList.toggle("hidden", !(b < 1));
+  L.style.width = `${(a * 100).toFixed(3)}%`;
+  R.style.width = `${((1 - b) * 100).toFixed(3)}%`;
 }
 
 // One pending "source finished loading" callback. Every source switch
@@ -953,6 +1136,8 @@ async function selectVideo(path) {
     setCaptureState(false);
     flashTopMessage("Capture cancelled — the source video changed");
   }
+  // A From / To note is about the previous source's part.
+  if (path !== currentVideo) clearTrimNote();
   if (!path) {
     currentVideo = null;
     thumbRelease();
@@ -1247,9 +1432,11 @@ els.player.addEventListener("loadedmetadata", () => {
   applyPlayerCrop();
   layoutOverlayLayer();
   renderTextOverlays();
+  updateExportSourceControl();   // From / To need the duration
 });
 els.player.addEventListener("durationchange", () => {
   updatePlayerTime();
+  renderTimelineTrim();
 });
 els.player.addEventListener("progress", updateBuffered);
 els.player.addEventListener("play",  () => { updatePlayBtn(); pvSyncPlayBtn(); syncTextOverlayTiming(); syncMusicPlayback(); if (pvMode) pvArmWatchdog(pvPlan[pvPos]); });
@@ -1814,6 +2001,7 @@ function pvEnter() {
   els.previewOutputBtn.classList.add("active");
   els.previewOutputBtn.textContent = "■ Stop preview";
   els.timeline.classList.add("pv-disabled");   // raw scrubber off; use the output timeline
+  updateExportSourceControl();                 // From / To locked, timeline shading hidden
   renderTextList();                            // (re)draw editor + overlays now visible
   const intro = parseFloat(els.introSeconds.value || "0");
   flashTopMessage(`Preview output — ${pvPlan.length} segment(s)${intro ? `, intro ${intro}s not shown` : ""}`);
@@ -1838,6 +2026,7 @@ function pvExit() {
   els.previewOutputBtn.classList.remove("active");
   els.previewOutputBtn.textContent = "▶ Preview output";
   els.timeline.classList.remove("pv-disabled");
+  updateExportSourceControl();   // From / To editable again, shading back
   renderTextOverlays();   // pvMode now false -> clears the overlay layer
 }
 
@@ -3089,6 +3278,7 @@ function newProject() {
   sourceMode = {};
   sourceStats = {};
   sourceCrop = {};
+  sourceTrim = {};
 
   // Project name + selection.
   els.projectName.value = "";
@@ -3222,9 +3412,10 @@ async function exportSingleClip(clip, includeSlowmo) {
   }
 }
 
-// Export the WHOLE source now viewing as one file with its look burned in
-// (brightness/colour + crop, at the chosen output resolution). Same busy
-// guard, progress box and result handling as the per-event exports.
+// Export the source now viewing as one file with its look burned in
+// (brightness/colour + crop, at the chosen output resolution) -- the whole
+// video, or only its From -> To part when one is set. Same busy guard,
+// progress box and result handling as the per-event exports.
 async function exportFullSource() {
   if (!currentVideo) { flashTopMessage("Pick a source video first"); return; }
   await ensureAllAutoLevels();   // an auto level may still be pending for this source
@@ -3240,7 +3431,11 @@ async function exportFullSource() {
   const b = getBrightness(video);
   const look = [b ? `brightness ${b > 0 ? "+" : ""}${b}%` : "", getCrop(video) ? "crop" : ""]
     .filter(Boolean).join(" + ");
-  els.progressStage.textContent = `Exporting full source${look ? ` (${look})` : ""}…`;
+  const trim = getTrim(video);   // null = the whole video
+  const what = trim
+    ? `part ${fmtClock(trim.start)} → ${trim.end !== null ? fmtClock(trim.end) : "end"}`
+    : "full source";
+  els.progressStage.textContent = `Exporting ${what}${look ? ` (${look})` : ""}…`;
   els.progressMsg.textContent = baseName(video);
   els.progressBox.scrollIntoView({ behavior: "smooth", block: "nearest" });
 
@@ -3251,6 +3446,8 @@ async function exportFullSource() {
       brightness: b,
       color: getColorParams(video),
       crop: getCrop(video),
+      start: trim ? trim.start : null,   // seconds on the source; null = from the start
+      end: trim ? trim.end : null,       // null = to the end
     };
     const res = await fetch("/api/export-source", {
       method: "POST",
@@ -3850,6 +4047,27 @@ els.undoClipBtn.addEventListener("click", undoClips);
 
 els.renderBtn.addEventListener("click", startRender);
 els.exportSourceBtn.addEventListener("click", exportFullSource);
+els.trimStartBtn.addEventListener("click", () => setTrimFromPlayhead("start"));
+els.trimEndBtn.addEventListener("click", () => setTrimFromPlayhead("end"));
+els.trimResetBtn.addEventListener("click", () => {
+  if (!currentVideo || pvMode) return;
+  setTrim(currentVideo, null);
+  saveState();
+  updateExportSourceControl();
+  trimNote("Whole video — From / To cleared");
+});
+for (const [input, side] of [[els.trimStart, "start"], [els.trimEnd, "end"]]) {
+  input.addEventListener("change", () => commitTrimField(side));
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); input.blur(); }   // blur -> change -> commit
+    else if (e.key === "Escape") {
+      e.preventDefault();
+      e.stopPropagation();   // revert this field only (no preview exit / crop cancel)
+      renderTrimFields(true);
+      input.blur();
+    }
+  });
+}
 els.cancelBtn.addEventListener("click", cancelRender);
 els.openFolderBtn.addEventListener("click", openOutputFolder);
 els.newRenderBtn.addEventListener("click", () => {
@@ -3868,6 +4086,17 @@ document.addEventListener("keydown", (e) => {
   if (cropEditing) return;  // the crop editor owns the keyboard (Esc handled above)
 
   if (!els.player.src) return;
+
+  // [ / ] = Export source From / To at the playhead. The physical bracket keys
+  // count too, for layouts where they type another character.
+  const trimKey = (e.key === "[" || e.key === "]") ? e.key
+    : (e.ctrlKey || e.altKey || e.metaKey) ? null
+    : e.code === "BracketLeft" ? "[" : e.code === "BracketRight" ? "]" : null;
+  if (trimKey && !e.metaKey && !(e.ctrlKey && !e.altKey)) {   // AltGr (= Ctrl+Alt) is fine
+    e.preventDefault();
+    setTrimFromPlayhead(trimKey === "[" ? "start" : "end");
+    return;
+  }
 
   switch (e.key) {
     case " ":

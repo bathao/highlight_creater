@@ -724,21 +724,39 @@ async def export_clip(req: ExportClipRequest) -> JSONResponse:
 
 
 class ExportSourceRequest(BaseModel):
-    """Export the WHOLE source video with its per-source look burned in."""
+    """Export the source video — whole, or only the part From -> To — with its
+    per-source look burned in."""
     video: str
     out_height: int = Field(ge=0, le=2160, default=0)  # 0 = native source height
     brightness: float = Field(ge=-50, le=50, default=0)  # per-source brightness (%)
     color: Optional[ColorModel] = None  # derived look; None = derive from brightness
     crop: Optional[CropModel] = None  # per-source crop region; None = full frame
+    start: Optional[float] = Field(ge=0, default=None)  # keep from (s); None = from the start
+    end: Optional[float] = Field(gt=0, default=None)    # keep up to (s); None = to the end
+
+
+MIN_PART_SECONDS = 0.5  # shortest part "Export source" accepts
+
+
+def _time_label(sec: float) -> str:
+    """Compact, filename-safe clock for output names: 150 -> '2m30s',
+    3725 -> '1h02m05s'. Rounded half-up to whole seconds, like the UI's
+    fmtClock (Python's round() would send 12.5 to 12)."""
+    total = int(max(0.0, sec) + 0.5)
+    h, rem = divmod(total, 3600)
+    m, s = divmod(rem, 60)
+    return f"{h}h{m:02d}m{s:02d}s" if h else f"{m}m{s:02d}s"
 
 
 @app.post("/api/export-source")
 async def export_source(req: ExportSourceRequest) -> JSONResponse:
-    """Export the whole source video as one file — the same brightness/colour
-    and crop the player shows, burned in, at the chosen output resolution.
+    """Export the source video as one file — the whole of it, or only the part
+    From -> To (`start`/`end`, seconds) — with the same brightness/colour and
+    crop the player shows, burned in, at the chosen output resolution.
     No intro, slow-mo or events: this reuses the single-clip pipeline with one
-    real-speed clip spanning the probed duration, so the look is bit-identical
-    to the per-event exports and the main render.
+    real-speed clip spanning the kept range, so the look is bit-identical to
+    the per-event exports and the main render. The segment is re-encoded, so
+    the cut is frame-accurate (not snapped to keyframes).
     """
     video_path = _safe_source_path(req.video)
     info = render.probe_video(video_path)
@@ -746,7 +764,20 @@ async def export_source(req: ExportSourceRequest) -> JSONResponse:
     if duration <= 0.05:
         raise HTTPException(400, "Could not read the source video's duration")
 
-    clip = render.Clip(start=0.0, end=duration, slowmo=False,
+    # Kept range, clamped to the probed duration. A range that covers the whole
+    # video is exported exactly like before (`<stem>_full`).
+    start = min(float(req.start or 0.0), duration)
+    end = duration if req.end is None else min(float(req.end), duration)
+    if end - start < MIN_PART_SECONDS:
+        raise HTTPException(
+            400, f"The part to export is too short or outside the video — keep at "
+                 f"least {MIN_PART_SECONDS:g} s between From and To")
+    is_part = start > 0.0005 or end < duration - 0.0005
+    stem = Path(req.video).stem
+    output_basename = (f"{stem}_part_{_time_label(start)}-{_time_label(end)}"
+                       if is_part else f"{stem}_full")
+
+    clip = render.Clip(start=start, end=end, slowmo=False,
                        video_path=video_path, brightness=req.brightness,
                        color=req.color.model_dump() if req.color else None,
                        crop=req.crop.model_dump() if req.crop else None)
@@ -760,14 +791,15 @@ async def export_source(req: ExportSourceRequest) -> JSONResponse:
         tournament="",
         player1="",
         player2="",
-        output_basename=f"{Path(req.video).stem}_full",
+        output_basename=output_basename,
         out_height=req.out_height,
     )
     render.register_job(job)
 
     t = threading.Thread(target=render.run_job, args=(job,), daemon=True)
     t.start()
-    return JSONResponse({"job_id": job.job_id, "duration": duration})
+    return JSONResponse({"job_id": job.job_id, "duration": duration,
+                         "start": start, "end": end})
 
 
 @app.post("/api/render")

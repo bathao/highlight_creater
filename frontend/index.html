@@ -40,6 +40,7 @@
     <kbd>I</kbd> mark in
     <kbd>O</kbd> mark out
     <kbd>,</kbd>/<kbd>.</kbd> frame
+    <kbd>[</kbd>/<kbd>]</kbd> export from/to
   </div>
 </header>
 
@@ -78,13 +79,13 @@
       <label>Intro (seconds)
         <input id="introSeconds" type="number" min="0" max="15" step="0.5" value="4" />
       </label>
-      <label>Source video (now viewing)
+      <div class="field">Source video (now viewing)
         <button id="pickVideoBtn" type="button" class="btn pick-video" title="Pick a video from any drive/folder">
           <span class="pick-icon">📂</span>
           <span id="pickVideoLabel" class="pick-label">Choose source video…</span>
         </button>
         <small class="hint">Pick from any drive/folder — processed in place, no copy into workspace. Switch videos to add events from multiple sources.</small>
-      </label>
+      </div>
       <label>☀ Brightness: <span id="brightLabel">0%</span>
         <div class="bright-row">
           <input id="brightSlider" type="range" min="-50" max="50" step="5" value="0" disabled
@@ -110,20 +111,38 @@
         </div>
         <small id="brightHint" class="hint">Per source video — pick the level by eye; gamma, contrast, colour and gain are set automatically from the footage. Live in the player, burned into the export.</small>
       </label>
-      <label>✂ Crop: <span id="cropLabel">full frame</span>
+      <div class="field">✂ Crop: <span id="cropLabel">full frame</span>
         <div class="crop-row">
           <button id="cropBtn" type="button" class="btn small" disabled
                   title="Crop the current source to a region of interest">✂ Edit crop</button>
         </div>
         <small class="hint">Per source video — zoom to a region; applies to every event from this source and to exports. Small crops of low-res sources will look soft.</small>
-      </label>
-      <label>⤓ Export source: <span id="exportSourceInfo">—</span>
+      </div>
+      <div class="field">⤓ Export source: <span id="exportSourceInfo">—</span>
+        <!-- Part selector: keep only From -> To of the source (per source video). -->
+        <div class="trim-grid">
+          <span class="trim-cap">From</span>
+          <input id="trimStart" class="trim-input" type="text" autocomplete="off" spellcheck="false"
+                 placeholder="00:00.00" disabled
+                 title="Keep the video from this time (m:ss or seconds). Empty = from the start." />
+          <button id="trimStartBtn" type="button" class="btn small ghost" disabled
+                  title="Set From to the player position (key [)">⇤ Playhead</button>
+          <span class="trim-cap">To</span>
+          <input id="trimEnd" class="trim-input" type="text" autocomplete="off" spellcheck="false"
+                 placeholder="end" disabled
+                 title="Keep the video up to this time (m:ss or seconds). Empty = to the end." />
+          <button id="trimEndBtn" type="button" class="btn small ghost" disabled
+                  title="Set To to the player position (key ])">⇥ Playhead</button>
+        </div>
+        <small id="trimMsg" class="hint trim-msg hidden"></small>
         <div class="crop-row">
           <button id="exportSourceBtn" type="button" class="btn small primary" disabled
                   title="Export the whole video now viewing as one file, with its brightness and crop burned in — no intro, slow-mo or events">⤓ Export full source</button>
+          <button id="trimResetBtn" type="button" class="btn small ghost trim-reset hidden"
+                  title="Clear From / To — export the whole video again">↺ Whole video</button>
         </div>
-        <small class="hint">The whole video now viewing, with the brightness and crop above burned in, at the output resolution below. Progress shows in 4 · Export Video; the file lands in the output folder as <code>&lt;source&gt;_full_&lt;time&gt;.mp4</code>.</small>
-      </label>
+        <small class="hint">The video now viewing — all of it, or only From → To — with the brightness and crop above burned in, at the output resolution below. Type m:ss or take the player position (keys <kbd>[</kbd> <kbd>]</kbd>). Progress shows in 4 · Export Video; files are named <code>&lt;source&gt;_full_…</code> or <code>&lt;source&gt;_part_&lt;from&gt;-&lt;to&gt;_…</code>.</small>
+      </div>
       <label>Slow-motion: <span id="slowLabel">50%</span>
         <input id="slowSlider" type="range" min="10" max="100" step="5" value="50" />
         <small class="hint" id="slowHint">Plays at 50% of real speed (2× slower)</small>
@@ -132,7 +151,7 @@
         <select id="resolutionSelect" title="Choose output resolution — max = source video resolution">
           <option value="0">Auto</option>
         </select>
-        <small class="hint" id="resHint">Applies to all exports (full render, per-event Export / Export + Replay, Export full source). Capped at the source resolution, never upscaled.</small>
+        <small class="hint" id="resHint">Applies to all exports (full render, per-event Export / Export + Replay, Export source — full or part). Capped at the source resolution, never upscaled.</small>
       </label>
     </div>
   </section>
@@ -174,6 +193,9 @@
       <div class="timeline-track">
         <div class="timeline-buffered" id="timelineBuffered"></div>
         <div class="timeline-progress" id="timelineProgress"></div>
+        <!-- Parts outside Export source From -> To, dimmed (display only). -->
+        <div class="timeline-trim left hidden" id="timelineTrimL"></div>
+        <div class="timeline-trim right hidden" id="timelineTrimR"></div>
         <div class="timeline-thumb" id="timelineThumb"></div>
       </div>
       <!-- Hover tooltip: a live frame thumbnail (raw-source timeline only) + the time. -->

@@ -127,7 +127,7 @@ kbd {
   flex-direction: column;
   gap: 11px;
 }
-.setup label {
+.setup label, .setup .field {
   display: flex; flex-direction: column; gap: 6px;
   font-size: 12px; color: #8b94a7; text-transform: uppercase; letter-spacing: 0.5px;
 }
@@ -307,6 +307,16 @@ input[type="range"] {
   box-shadow: 0 0 0 2px #4a7dff, 0 2px 8px rgba(0,0,0,0.4);
 }
 .timeline:hover .timeline-thumb { transform: translate(-50%, -50%) scale(1); }
+/* Parts cut off by Export source From / To: dimmed + amber edge at the cut. */
+.timeline-trim {
+  position: absolute; top: -2px; bottom: -2px;
+  background: repeating-linear-gradient(135deg,
+    rgba(6, 9, 16, 0.82) 0 4px, rgba(6, 9, 16, 0.6) 4px 8px);
+  pointer-events: none;
+}
+.timeline-trim.left  { left: 0;  border-right: 2px solid #f5b342; border-radius: 3px 0 0 3px; }
+.timeline-trim.right { right: 0; border-left: 2px solid #f5b342;  border-radius: 0 3px 3px 0; }
+.timeline-trim.hidden { display: none; }
 .timeline-tooltip {
   position: absolute;
   bottom: 24px;
@@ -931,6 +941,25 @@ input[type="range"] {
 /* Per-source crop (lives in the Setup grid, under Brightness) */
 .crop-row { display: flex; align-items: center; gap: 8px; }
 .crop-row .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* Export source: From / To part selector */
+.trim-grid {
+  display: grid; grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center; gap: 6px 8px;
+}
+.trim-cap { min-width: 34px; }
+.trim-grid .trim-input {   /* beats the generic input[type="text"] padding/size */
+  width: 100%; min-width: 0;
+  padding: 5px 8px; font-size: 13px;
+  font-family: 'Cascadia Code', Consolas, monospace;
+}
+.trim-grid .trim-input:disabled, .trim-grid .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.trim-grid .trim-input.invalid { border-color: #ff6b6b; }   /* beats :focus */
+.trim-grid .btn { padding: 4px 9px; white-space: nowrap; }
+.trim-msg { color: #f5b342; }
+.trim-msg.error { color: #ff7a7a; }
+.trim-msg.hidden { display: none; }
+.btn.trim-reset.hidden { display: none; }
 
 /* ----- Crop editor (over the player) ----- */
 .crop-editor {
